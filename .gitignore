@@ -239,6 +239,7 @@ __marimo__/
 *.pt
 *.pth
 *.ckpt
+*.pkl
 
 # Common folders for datasets or output
 /data/
@@ -398,3 +399,5 @@ logs/
 moellava/eval/vqav2/*.jsonl
 checkpoints/
 *.zip
+
+kmeans_trial/cache_dir/*
