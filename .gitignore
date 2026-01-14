@@ -395,3 +395,6 @@ conda/
 *.log
 logs/
 **/*.log
+moellava/eval/vqav2/*.jsonl
+checkpoints/
+*.zip
