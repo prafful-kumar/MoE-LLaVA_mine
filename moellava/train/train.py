@@ -48,12 +48,19 @@ from transformers import TrainerCallback
 
 class KDLogCallback(TrainerCallback):
     def on_log(self, args, state, control, model=None, logs=None, **kwargs):
-        # Print KD loss for the first MoE layer just to check
+        # Create a list to store losses for a cleaner single-line print
+        kd_losses = []
+        
         for name, module in model.named_modules():
             if hasattr(module, 'gate') and hasattr(module.gate, 'last_kd_loss'):
-                # We found a gate!
-                print(f"\n[Step {state.global_step}] Layer {name} KD Loss: {module.gate.last_kd_loss:.6f}")
-                break # Just print one to avoid spam
+                # Store the loss value
+                loss_val = module.gate.last_kd_loss
+                layer_id = name.split('.')[2] # Extracts '0', '1', etc. from 'model.layers.0...'
+                kd_losses.append(f"L{layer_id}={loss_val:.4f}")
+
+        # Print all in one line to save space
+        if kd_losses:
+            print(f"\n[Step {state.global_step}] KD Loss: " + " | ".join(kd_losses))
 
 def rank0_print(*args):
     if local_rank == 0:

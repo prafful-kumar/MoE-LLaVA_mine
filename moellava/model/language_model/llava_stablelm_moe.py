@@ -54,7 +54,7 @@ class KDTopKGate(TopKGate):
     """
     
     def __init__(self, model_dim, num_experts, k=1, centroids=None, 
-                 kd_loss_weight=0.1, ema_decay=0.999, **kwargs):
+                 kd_loss_weight=0.01, aux_loss_weight=0.01, ema_decay=0.999, **kwargs):
         """
         Args:
             model_dim: Model hidden dimension
@@ -69,6 +69,7 @@ class KDTopKGate(TopKGate):
         
         self.kd_loss_weight = kd_loss_weight
         self.ema_decay = ema_decay
+        self.aux_loss_weight = aux_loss_weight
         
         # Student weights: Already randomly initialized by parent's __init__
         # (self.wg.weight is created in parent with default PyTorch init)
@@ -114,19 +115,24 @@ class KDTopKGate(TopKGate):
         # Ensure input is float32 for gate computation
         input_fp32 = input.float()
         
-        # Compute student logits
-        # Note: This is also computed in parent's forward, but we need it for KD
-        # Small overhead, but necessary without modifying DeepSpeed
-        if self.wg.weight.dtype != torch.float32:
-            self.wg = self.wg.float()
-        student_logits = self.wg(input_fp32)
-        
+        # --- [FIX 2] Safer Student Logits Calculation ---
+        # Do NOT convert self.wg to float() permanently. 
+        # Just cast weights for this specific operation to avoid breaking mixed precision.
+        student_logits = F.linear(input_fp32, self.wg.weight.to(dtype=torch.float32))
+
+
         # Call parent's forward for standard gating logic
         # This handles: top-k selection, capacity constraints, tutel, etc.
         gate_output = super().forward(input, used_token, use_tutel)
+
+        raw_aux_loss = gate_output[0]
+        weighted_aux_loss = self.aux_loss_weight * raw_aux_loss
         
-        # Extract l_aux for monitoring
-        self.last_moe_loss = gate_output[0].item() if isinstance(gate_output[0], torch.Tensor) else 0.0
+        # Store for logging purposes (handle case where loss might be None or scalar)
+        if isinstance(raw_aux_loss, torch.Tensor):
+             self.last_moe_loss = raw_aux_loss.item()
+        else:
+             self.last_moe_loss = 0.0
         
         # Knowledge Distillation (only during training)
         if self.training and self.has_teacher:
@@ -166,9 +172,14 @@ class KDTopKGate(TopKGate):
                     alpha=1.0 - self.ema_decay
                 )
             
-            # Combine KD loss with MoE auxiliary loss
-            l_aux_combined = gate_output[0] + (self.kd_loss_weight * kd_loss)
-            gate_output = (l_aux_combined,) + gate_output[1:]
+            weighted_kd_loss = self.kd_loss_weight * kd_loss
+            
+            # Combine
+            total_loss = weighted_aux_loss + weighted_kd_loss
+        else:
+            total_loss = weighted_aux_loss
+
+        gate_output = (total_loss,) + gate_output[1:]
         
         return gate_output
     
@@ -757,6 +768,14 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
                     p.requires_grad = False
 
 
+        user_aux_weight = getattr(model_args, 'router_aux_loss_coef', 0.01)
+        # Force the Model's global multiplier to 1.0
+        # This ensures "loss += 1.0 * (weighted_aux + weighted_kd)"
+        if hasattr(self, 'router_aux_loss_coef'):
+            print(f"⚠️ Overriding global router_aux_loss_coef from {self.router_aux_loss_coef} to 1.0")
+            print(f"   (Handling weighting internally: Aux={user_aux_weight}, KD={model_args.kd_loss_weight})")
+            self.router_aux_loss_coef = 1.0
+            self.config.router_aux_loss_coef = 1.0
 
         num_layers = self.config.num_hidden_layers
 
@@ -891,6 +910,7 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
                 k=model_args.top_k_experts,
                 centroids=layer_centroids,
                 kd_loss_weight=getattr(model_args, 'kd_loss_weight', 0.1),
+                aux_loss_weight=user_aux_weight,
                 ema_decay=getattr(model_args, 'ema_decay', 0.999),
                 capacity_factor=model_args.capacity_factor,
                 eval_capacity_factor=model_args.eval_capacity_factor,
