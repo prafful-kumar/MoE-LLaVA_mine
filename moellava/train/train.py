@@ -44,6 +44,17 @@ from moellava.utils import order_pick_k
 local_rank = None
 
 
+from transformers import TrainerCallback
+
+class KDLogCallback(TrainerCallback):
+    def on_log(self, args, state, control, model=None, logs=None, **kwargs):
+        # Print KD loss for the first MoE layer just to check
+        for name, module in model.named_modules():
+            if hasattr(module, 'gate') and hasattr(module.gate, 'last_kd_loss'):
+                # We found a gate!
+                print(f"\n[Step {state.global_step}] Layer {name} KD Loss: {module.gate.last_kd_loss:.6f}")
+                break # Just print one to avoid spam
+
 def rank0_print(*args):
     if local_rank == 0:
         print(*args)
@@ -96,6 +107,10 @@ class ModelArguments:
     min_capacity: int = 0
     use_residual: bool = False
     router_aux_loss_coef: float = 0.01
+
+    router_centroids_path: Optional[str] = field(default=None)
+    kd_loss_weight: float = field(default=0.01)
+    ema_decay: float = field(default=0.999)
     # =============================================================
 
 @dataclass
@@ -1297,6 +1312,10 @@ def train():
             **bnb_model_from_pretrained_args
         )
     rank0_print('LLM init. firstly\n', model)
+    # # [INSERT THIS] Initialize Student-Teacher MoE Router
+    # print("Initializing MoE Router with Centroids...")
+    # model.initialize_moe_modules(model_args)
+
     model.config.use_cache = False
 
     if model_args.freeze_backbone:
@@ -1527,6 +1546,7 @@ def train():
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,
                     args=training_args,
+                    callbacks=[KDLogCallback],
                     **data_module)
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):

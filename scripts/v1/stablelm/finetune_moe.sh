@@ -8,7 +8,7 @@ router_aux_loss_coef=0.01
 JSON_FOLDER="train_json"
 IMAGE_FOLDER="IMAGE_FOLDER"
 
-HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:4,5,6,7 moellava/train/train_mem.py \
+HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:2,3 --master_port $((2 + 29501)) moellava/train/train_mem.py \
     --moe_enable True --num_experts ${num_experts} --top_k_experts ${top_k_experts} --capacity_factor 1.5 \
     --moe_mode ${moe_mode} --use_residual ${use_residual} --router_aux_loss_coef ${router_aux_loss_coef} \
     --train_modules gate_proj up_proj down_proj wg \
@@ -25,7 +25,7 @@ HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:4,5,6
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
-    --output_dir ./kmeans_6k/MoE-LLaVA-StableLM-Stage2-moe \
+    --output_dir ./kmeans_40000_KD_first_time/MoE-LLaVA-StableLM-Stage2-moe \
     --num_train_epochs 1 \
     --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 4 \
@@ -45,4 +45,7 @@ HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:4,5,6
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
     --report_to tensorboard \
-    --cache_dir "./cache_dir"
+    --cache_dir "./cache_dir" \
+    --router_centroids_path "kmeans_trial/kmeans_trial/teacher_centroids_40000.pkl" \
+    --kd_loss_weight 0.01 \
+    --ema_decay 0.999

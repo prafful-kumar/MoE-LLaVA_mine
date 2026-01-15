@@ -36,7 +36,313 @@ from torch.nn import CrossEntropyLoss
 from transformers.models.llama.modeling_llama import logger
 from transformers.utils import ModelOutput
 
+import joblib
+from deepspeed.moe.sharded_moe import TopKGate
+import os
+from typing import Dict, List
+import numpy as np
+from deepspeed.moe.experts import Experts
+
 local_rank = None
+
+class KDTopKGate(TopKGate):
+    """
+    Knowledge Distillation Gate with Teacher initialized from centroids.
+    
+    Teacher: Initialized from K-means centroids (stable, good initialization)
+    Student: Random initialization (learns optimal routing)
+    """
+    
+    def __init__(self, model_dim, num_experts, k=1, centroids=None, 
+                 kd_loss_weight=0.1, ema_decay=0.999, **kwargs):
+        """
+        Args:
+            model_dim: Model hidden dimension
+            num_experts: Number of experts
+            k: Top-k experts to route to
+            centroids: K-means centroids [num_experts, model_dim] - for teacher init
+            kd_loss_weight: Weight for KD loss term
+            ema_decay: EMA decay rate for teacher updates (0.999 = very slow)
+            **kwargs: Other TopKGate parameters
+        """
+        super().__init__(model_dim, num_experts, k, **kwargs)
+        
+        self.kd_loss_weight = kd_loss_weight
+        self.ema_decay = ema_decay
+        
+        # Student weights: Already randomly initialized by parent's __init__
+        # (self.wg.weight is created in parent with default PyTorch init)
+        
+        # Teacher weights: Initialize from centroids
+        if centroids is not None:
+            # Validate shape
+            assert centroids.shape == (num_experts, model_dim), \
+                f"Centroid shape {centroids.shape} != expected ({num_experts}, {model_dim})"
+            
+            # Convert to tensor with proper device/dtype
+            # Don't specify device here - will be moved when gate is moved to device
+            teacher_init = torch.from_numpy(centroids).float()
+            
+            # Register as buffer (persistent=False means not saved in checkpoint)
+            self.register_buffer('teacher_weight', teacher_init, persistent=False)
+            self.has_teacher = True
+        else:
+            # No centroids provided - initialize teacher as copy of random student
+            # This is fallback, but not recommended
+            self.register_buffer('teacher_weight', 
+                               self.wg.weight.data.clone().detach(), 
+                               persistent=False)
+            self.has_teacher = True
+        
+        # For monitoring/logging
+        self.last_kd_loss = 0.0
+        self.last_moe_loss = 0.0
+    
+    def forward(self, input, used_token=None, use_tutel=False):
+        """
+        Forward pass with student-teacher distillation.
+        
+        Flow:
+        1. Get student logits (need to compute separately for KD)
+        2. Call parent's forward for standard gating
+        3. Get teacher logits (from stable teacher weights)
+        4. Compute KD loss
+        5. Update teacher via EMA
+        6. Combine losses
+        """
+        
+        # Ensure input is float32 for gate computation
+        input_fp32 = input.float()
+        
+        # Compute student logits
+        # Note: This is also computed in parent's forward, but we need it for KD
+        # Small overhead, but necessary without modifying DeepSpeed
+        if self.wg.weight.dtype != torch.float32:
+            self.wg = self.wg.float()
+        student_logits = self.wg(input_fp32)
+        
+        # Call parent's forward for standard gating logic
+        # This handles: top-k selection, capacity constraints, tutel, etc.
+        gate_output = super().forward(input, used_token, use_tutel)
+        
+        # Extract l_aux for monitoring
+        self.last_moe_loss = gate_output[0].item() if isinstance(gate_output[0], torch.Tensor) else 0.0
+        
+        # Knowledge Distillation (only during training)
+        if self.training and self.has_teacher:
+            # Compute teacher logits using stable teacher weights
+            with torch.no_grad():
+                # Ensure teacher is on same device/dtype as input
+                teacher_weight = self.teacher_weight.to(
+                    device=input_fp32.device,
+                    dtype=input_fp32.dtype
+                )
+                teacher_logits = F.linear(input_fp32, teacher_weight)
+            
+            # KL Divergence Loss: Student learns from Teacher
+            # Student (log probabilities) vs Teacher (probabilities)
+            kd_loss = F.kl_div(
+                F.log_softmax(student_logits, dim=-1),
+                F.softmax(teacher_logits, dim=-1),  # Teacher is detached (no grad)
+                reduction='batchmean'
+            )
+            
+            self.last_kd_loss = kd_loss.item()
+            
+            # EMA Update: Teacher slowly follows Student
+            # This makes teacher adapt to student's learning while staying stable
+            with torch.no_grad():
+                # Ensure same device/dtype for EMA
+                teacher_device = self.teacher_weight.device
+                teacher_dtype = self.teacher_weight.dtype
+                student_weight = self.wg.weight.data.to(
+                    device=teacher_device,
+                    dtype=teacher_dtype
+                )
+                
+                # EMA: teacher = decay * teacher + (1-decay) * student
+                self.teacher_weight.mul_(self.ema_decay).add_(
+                    student_weight,
+                    alpha=1.0 - self.ema_decay
+                )
+            
+            # Combine KD loss with MoE auxiliary loss
+            l_aux_combined = gate_output[0] + (self.kd_loss_weight * kd_loss)
+            gate_output = (l_aux_combined,) + gate_output[1:]
+        
+        return gate_output
+    
+    def get_loss_dict(self):
+        """Return dictionary of losses for logging"""
+        return {
+            'moe_loss': self.last_moe_loss,
+            'kd_loss': self.last_kd_loss,
+            'total_aux_loss': self.last_moe_loss + self.kd_loss_weight * self.last_kd_loss
+        }
+    
+    def disable_teacher(self):
+        """
+        Disable teacher for inference or before saving checkpoint.
+        Call this after training is complete.
+        """
+        if self.has_teacher:
+            self.teacher_weight = None
+            self.has_teacher = False
+            torch.cuda.empty_cache()
+
+def copy_mlp_to_experts(original_mlp: nn.Module, 
+                       moe_layer,
+                       num_experts: int,
+                       verbose: bool = True) -> Dict[str, bool]:
+    """
+    Copy weights from original MLP to all experts in MoE layer.
+    
+    Args:
+        original_mlp: The original MLP module (before MoE conversion)
+        moe_layer: The CustomMoE layer (after conversion)
+        num_experts: Number of experts
+        verbose: Print detailed information
+    
+    Returns:
+        Dictionary with verification results
+    """
+    
+    print(f"\n{'='*60}")
+    print(f"Copying MLP weights to {num_experts} experts")
+    print(f"{'='*60}\n")
+    
+    # Get the experts module
+    experts = moe_layer.deepspeed_moe.experts
+    
+    # Get original MLP state dict
+    original_state_dict = original_mlp.state_dict()
+    
+    if verbose:
+        print("Original MLP parameters:")
+        for name, param in original_state_dict.items():
+            print(f"  {name}: {param.shape}")
+        print()
+    
+    # Copy to each expert
+    for expert_idx in range(num_experts):
+        expert = experts.deepspeed_experts[expert_idx]
+        
+        if verbose:
+            print(f"Copying to Expert {expert_idx}...")
+        
+        # Load the same weights into each expert
+        expert.load_state_dict(original_state_dict, strict=True)
+        
+        if verbose:
+            print(f"  ✓ Expert {expert_idx} weights copied successfully")
+    
+    print(f"\n✓ All {num_experts} experts initialized with MLP weights\n")
+    
+    # Verify the copying
+    verification_results = verify_weight_copying(
+        original_mlp, 
+        moe_layer, 
+        num_experts,
+        verbose=verbose
+    )
+    
+    return verification_results
+
+
+def verify_weight_copying(original_mlp: nn.Module,
+                         moe_layer,
+                         num_experts: int,
+                         atol: float = 1e-6,
+                         verbose: bool = True) -> Dict[str, bool]:
+    """
+    Verify that all experts have the same weights as original MLP.
+    
+    Args:
+        original_mlp: Original MLP module
+        moe_layer: CustomMoE layer
+        num_experts: Number of experts
+        atol: Absolute tolerance for comparison
+        verbose: Print detailed verification
+    
+    Returns:
+        Dictionary with verification status for each check
+    """
+    
+    print(f"{'='*60}")
+    print(f"VERIFICATION: Checking weight equality")
+    print(f"{'='*60}\n")
+    
+    results = {
+        'all_experts_match_mlp': True,
+        'experts_match_each_other': True,
+        'parameter_details': {}
+    }
+    
+    # Get original MLP state dict
+    original_state_dict = original_mlp.state_dict()
+    experts = moe_layer.deepspeed_moe.experts
+    
+    # Check each parameter
+    for param_name, original_param in original_state_dict.items():
+        if verbose:
+            print(f"Checking parameter: {param_name}")
+            print(f"  Shape: {original_param.shape}")
+        
+        param_matches = True
+        expert_params = []
+        
+        # Compare each expert with original MLP
+        for expert_idx in range(num_experts):
+            expert = experts.deepspeed_experts[expert_idx]
+            expert_state_dict = expert.state_dict()
+            
+            if param_name not in expert_state_dict:
+                print(f"  ✗ Expert {expert_idx}: Parameter '{param_name}' not found!")
+                param_matches = False
+                results['all_experts_match_mlp'] = False
+                continue
+            
+            expert_param = expert_state_dict[param_name]
+            expert_params.append(expert_param)
+            
+            # Check if expert parameter matches original
+            if not torch.allclose(expert_param, original_param, atol=atol):
+                max_diff = torch.max(torch.abs(expert_param - original_param)).item()
+                print(f"  ✗ Expert {expert_idx}: MISMATCH! Max diff: {max_diff:.2e}")
+                param_matches = False
+                results['all_experts_match_mlp'] = False
+            else:
+                if verbose:
+                    print(f"  ✓ Expert {expert_idx}: Match (diff < {atol})")
+        
+        # Check if all experts match each other
+        if len(expert_params) > 1:
+            for i in range(1, len(expert_params)):
+                if not torch.allclose(expert_params[0], expert_params[i], atol=atol):
+                    max_diff = torch.max(torch.abs(expert_params[0] - expert_params[i])).item()
+                    print(f"  ✗ Expert 0 vs Expert {i}: MISMATCH! Max diff: {max_diff:.2e}")
+                    results['experts_match_each_other'] = False
+        
+        results['parameter_details'][param_name] = param_matches
+        
+        if verbose:
+            print()
+    
+    # Print summary
+    print(f"{'='*60}")
+    print("VERIFICATION SUMMARY")
+    print(f"{'='*60}")
+    print(f"✓ All experts match MLP: {results['all_experts_match_mlp']}")
+    print(f"✓ All experts match each other: {results['experts_match_each_other']}")
+    
+    if results['all_experts_match_mlp'] and results['experts_match_each_other']:
+        print("\n🎉 SUCCESS: All weight copying verified correctly!")
+    else:
+        print("\n⚠️  WARNING: Weight copying verification failed!")
+    
+    print(f"{'='*60}\n")
+    
+    return results
 
 
 def rank0_print(*args):
@@ -478,11 +784,32 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
             self.config.moe['num_experts'] = model_args.num_experts * len(moe_layers_idx)
         assert len(self.config.moe['num_experts']) == len(moe_layers_idx)
 
+        # Load centroids if provided
+        centroid_file = getattr(model_args, 'router_centroids_path', None)
+        all_centroids = None
+        if centroid_file:
+            print(f"Loading router centroids from: {centroid_file}")
+            all_centroids = joblib.load(centroid_file)
+            print(f"Loaded centroids for layers: {list(all_centroids.keys())}")
+        else:
+            print("⚠️  Warning: No centroids provided. Teacher will use random init.")
+
+        if True: #student_teacher == 
+            print(f"\n{'='*70}")
+            print("Initializing MoE Modules with Student-Teacher Routing")
+            print(f"{'='*70}\n")
+
         for num_experts, layer_num in zip(self.config.moe['num_experts'], moe_layers_idx):
-            pretrained_state_dict = self.model.layers[layer_num].mlp.state_dict()
+
+            # 1. Save original MLP state for expert initialization
+            original_mlp = self.model.layers[layer_num].mlp
+            pretrained_state_dict = original_mlp.state_dict()
+            
+            print(f"Original MLP parameters: {sum(p.numel() for p in original_mlp.parameters()):,}")
+            
             self.model.layers[layer_num].mlp = MoE(
                 self.config.hidden_size,
-                expert=self.model.layers[layer_num].mlp,
+                expert=original_mlp,
                 num_experts=num_experts,
                 ep_size=model_args.ep_size,
                 k=model_args.top_k_experts,
@@ -497,19 +824,109 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
                 assert all([torch.allclose(loaded_state_dict[k], v) for k, v in pretrained_state_dict.items()])
 
 
-            print("Apply kmeans initialization")
+            # 3. Copy pretrained MLP weights to all experts
+            print("Copying MLP weights to experts...")
+            copy_mlp_to_experts(
+                original_mlp=original_mlp,
+                moe_layer=self.model.layers[layer_num].mlp,
+                num_experts=num_experts,
+                verbose=False
+            )
+            
+            # Verify copying
+            verification = verify_weight_copying(
+                original_mlp=original_mlp,
+                moe_layer=self.model.layers[layer_num].mlp,
+                num_experts=num_experts,
+                verbose=False
+            )
+            
+            if not verification['all_experts_match_mlp']:
+                raise RuntimeError(f"Expert weight copying failed for layer {layer_num}")
+            
+            print("✓ Expert weights initialized correctly")
 
-            router = self.model.layers[layer_num].mlp.deepspeed_moe.gate.wg
+            # router = self.model.layers[layer_num].mlp.deepspeed_moe.gate.wg
 
-            # load centroid file for this layer
-            path = f"/home/prafull/scratch/MoE-LLaVA-main/router_inits/centroids_model_layers_{layer_num}_post_attention_layernorm.pt" 
-            ckpt = torch.load(path, map_location="cpu")
-            centroids = ckpt["centroids"]   # [num_experts, hidden_size]
+            # # load centroid file for this layer
+            # path = f"/home/prafull/scratch/MoE-LLaVA-main/router_inits/centroids_model_layers_{layer_num}_post_attention_layernorm.pt" 
+            # ckpt = torch.load(path, map_location="cpu")
+            # centroids = ckpt["centroids"]   # [num_experts, hidden_size]
 
-            # assign to router
-            with torch.no_grad():
-                router.weight.copy_(centroids)
-            print(f"[Init] Router at layer {layer_num} initialized from {path}")
+            # # assign to router
+            # with torch.no_grad():
+            #     router.weight.copy_(centroids)
+            # print(f"[Init] Router at layer {layer_num} initialized from {path}")
+            # 4. Inject K-Means Centroids into Router
+            if all_centroids is not None and layer_num in all_centroids:
+                print("Apply kmeans initialization")
+                router = self.model.layers[layer_num].mlp.deepspeed_moe.gate.wg
+                
+                # Convert numpy array from pkl to torch tensor
+                # Your pkl shape is [num_experts, hidden_size]
+                centroids = torch.from_numpy(all_centroids[layer_num]).to(torch.float32)
+
+                with torch.no_grad():
+                    # Ensure device and dtype match (important for bfloat16/fp16 training)
+                    router.weight.copy_(centroids.to(device=router.weight.device, dtype=router.weight.dtype))
+                
+                print(f"[Init] Router at layer {layer_num} successfully initialized from centroids.")
+            else:
+                print(f"[Init] Router at layer {layer_num} initialized randomly (no centroids found).")
+
+
+            # 4. Get centroids for this layer
+            layer_centroids = None
+            if all_centroids and layer_num in all_centroids:
+                layer_centroids = all_centroids[layer_num]
+                print(f"✓ Using K-means centroids for teacher initialization")
+                print(f"  Centroid shape: {layer_centroids.shape}")
+            else:
+                print(f"⚠️  No centroids for layer {layer_num}, using random teacher init")
+            
+            # 5. Create KD Gate
+            kd_gate = KDTopKGate(
+                model_dim=self.config.hidden_size,
+                num_experts=num_experts,
+                k=model_args.top_k_experts,
+                centroids=layer_centroids,
+                kd_loss_weight=getattr(model_args, 'kd_loss_weight', 0.1),
+                ema_decay=getattr(model_args, 'ema_decay', 0.999),
+                capacity_factor=model_args.capacity_factor,
+                eval_capacity_factor=model_args.eval_capacity_factor,
+                min_capacity=model_args.min_capacity,
+                noisy_gate_policy=getattr(model_args, 'noisy_gate_policy', None),
+                drop_tokens=getattr(model_args, 'drop_tokens', True),
+                use_rts=getattr(model_args, 'use_rts', True),
+            )
+            
+            # Move gate to correct device
+            kd_gate = kd_gate.to(device=self.device, dtype=self.dtype)
+            
+            print(f"✓ KD Gate created:")
+            print(f"  Student weights: Random (PyTorch default)")
+            print(f"  Teacher weights: {'Centroids' if layer_centroids is not None else 'Random'}")
+            print(f"  KD loss weight: {kd_gate.kd_loss_weight}")
+            print(f"  EMA decay: {kd_gate.ema_decay}")
+            
+            # 6. Swap the gate in MOELayer
+            self.model.layers[layer_num].mlp.deepspeed_moe.gate = kd_gate
+            
+            # Verify student is random (not equal to teacher)
+            if layer_centroids is not None:
+                student_w = kd_gate.wg.weight.data
+                teacher_w = kd_gate.teacher_weight
+                max_diff = torch.max(torch.abs(student_w - teacher_w)).item()
+                print(f"\n✓ Student-Teacher difference: {max_diff:.6f}")
+                if max_diff < 1e-4:
+                    print("  ⚠️  WARNING: Student and teacher are too similar!")
+                    print("     Student should be random, not copied from teacher.")
+            
+            print(f"\n✓ Layer {layer_num} MoE initialization complete")
+
+        print(f"\n{'='*70}")
+        print("✅ All MoE modules initialized with Student-Teacher routing")
+        print(f"{'='*70}\n")
 
         # ipdb.set_trace()
         rank0_print(f"LLM num_layers: {num_layers}, MoE num_layers: {len(moe_layers_idx)}, where\n",
@@ -523,6 +940,30 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
         rank0_print(f'replace StablelmModel.forward to MoEStablelmModel.forward')
         # ipdb.set_trace()
 
+
+def remove_teachers_before_save(model):
+    """
+    Remove all teacher components before saving checkpoint.
+    
+    Call this after training is complete, before model.save_pretrained()
+    """
+    print("\n" + "="*70)
+    print("Removing Teacher Components")
+    print("="*70 + "\n")
+    
+    removed_count = 0
+    
+    for layer_idx, layer in enumerate(model.model.layers):
+        if hasattr(layer.mlp, 'deepspeed_moe'):
+            gate = layer.mlp.deepspeed_moe.gate
+            if hasattr(gate, 'disable_teacher'):
+                print(f"Layer {layer_idx}: Removing teacher...")
+                gate.disable_teacher()
+                removed_count += 1
+    
+    print(f"\n✓ Removed {removed_count} teacher components")
+    print("✓ Model now contains only student routers")
+    print("="*70 + "\n")
 
 class EvalMoELLaVAStablelmForCausalLM(MoELLaVAStablelmForCausalLM):
     config_class = MoELLaVAStablelmConfig
