@@ -44,141 +44,93 @@ import numpy as np
 from deepspeed.moe.experts import Experts
 
 local_rank = None
-
 class KDTopKGate(TopKGate):
     """
-    Knowledge Distillation Gate with Teacher initialized from centroids.
-    
-    Teacher: Initialized from K-means centroids (stable, good initialization)
-    Student: Random initialization (learns optimal routing)
+    Knowledge Distillation Gate.
+    - Teacher: Initialized with K-means centroids (or copied from student if None).
+    - Student: Randomly initialized (learns optimal routing).
+    - Weights: Manages Aux Loss and KD Loss internally.
     """
-    
     def __init__(self, model_dim, num_experts, k=1, centroids=None, 
                  kd_loss_weight=0.01, aux_loss_weight=0.01, ema_decay=0.999, **kwargs):
-        """
-        Args:
-            model_dim: Model hidden dimension
-            num_experts: Number of experts
-            k: Top-k experts to route to
-            centroids: K-means centroids [num_experts, model_dim] - for teacher init
-            kd_loss_weight: Weight for KD loss term
-            ema_decay: EMA decay rate for teacher updates (0.999 = very slow)
-            **kwargs: Other TopKGate parameters
-        """
         super().__init__(model_dim, num_experts, k, **kwargs)
         
         self.kd_loss_weight = kd_loss_weight
-        self.ema_decay = ema_decay
         self.aux_loss_weight = aux_loss_weight
+        self.ema_decay = ema_decay
         
-        # Student weights: Already randomly initialized by parent's __init__
-        # (self.wg.weight is created in parent with default PyTorch init)
-        
-        # Teacher weights: Initialize from centroids
+        # Teacher Initialization
         if centroids is not None:
-            # Validate shape
-            assert centroids.shape == (num_experts, model_dim), \
-                f"Centroid shape {centroids.shape} != expected ({num_experts}, {model_dim})"
-            
-            # Convert to tensor with proper device/dtype
-            # Don't specify device here - will be moved when gate is moved to device
+            # Validate and register buffer
+            assert centroids.shape == (num_experts, model_dim), f"Shape mismatch: {centroids.shape}"
             teacher_init = torch.from_numpy(centroids).float()
-            
-            # Register as buffer (persistent=False means not saved in checkpoint)
             self.register_buffer('teacher_weight', teacher_init, persistent=False)
             self.has_teacher = True
         else:
-            # No centroids provided - initialize teacher as copy of random student
-            # This is fallback, but not recommended
-            self.register_buffer('teacher_weight', 
-                               self.wg.weight.data.clone().detach(), 
-                               persistent=False)
+            # Fallback: Clone student (Effective for pure random baselines)
+            self.register_buffer('teacher_weight', self.wg.weight.data.clone(), persistent=False)
             self.has_teacher = True
         
-        # For monitoring/logging
+        # Logging placeholders
         self.last_kd_loss = 0.0
         self.last_moe_loss = 0.0
-    
+
     def forward(self, input, used_token=None, use_tutel=False):
-        """
-        Forward pass with student-teacher distillation.
-        
-        Flow:
-        1. Get student logits (need to compute separately for KD)
-        2. Call parent's forward for standard gating
-        3. Get teacher logits (from stable teacher weights)
-        4. Compute KD loss
-        5. Update teacher via EMA
-        6. Combine losses
-        """
-        
-        # Ensure input is float32 for gate computation
+        # 1. Safer Student Logits Calculation (Avoids permanent float32 cast on layer)
         input_fp32 = input.float()
-        
-        # --- [FIX 2] Safer Student Logits Calculation ---
-        # Do NOT convert self.wg to float() permanently. 
-        # Just cast weights for this specific operation to avoid breaking mixed precision.
+        # Cast weights just for this op to avoid breaking mixed precision
         student_logits = F.linear(input_fp32, self.wg.weight.to(dtype=torch.float32))
-
-
-        # Call parent's forward for standard gating logic
-        # This handles: top-k selection, capacity constraints, tutel, etc.
+        
+        # 2. Standard DeepSpeed Gating
         gate_output = super().forward(input, used_token, use_tutel)
 
+        # 3. Handle Load Balancing Loss (Internal Weighting)
         raw_aux_loss = gate_output[0]
         weighted_aux_loss = self.aux_loss_weight * raw_aux_loss
         
-        # Store for logging purposes (handle case where loss might be None or scalar)
+        # Log the raw aux loss safely
         if isinstance(raw_aux_loss, torch.Tensor):
              self.last_moe_loss = raw_aux_loss.item()
         else:
              self.last_moe_loss = 0.0
         
-        # Knowledge Distillation (only during training)
+        # 4. Knowledge Distillation (Training Only)
         if self.training and self.has_teacher:
-            # Compute teacher logits using stable teacher weights
+            # Teacher Forward (No Grad)
             with torch.no_grad():
-                # Ensure teacher is on same device/dtype as input
-                teacher_weight = self.teacher_weight.to(
-                    device=input_fp32.device,
-                    dtype=input_fp32.dtype
-                )
-                teacher_logits = F.linear(input_fp32, teacher_weight)
+                teacher_w = self.teacher_weight.to(device=input_fp32.device, dtype=input_fp32.dtype)
+                teacher_logits = F.linear(input_fp32, teacher_w)
             
-            # KL Divergence Loss: Student learns from Teacher
-            # Student (log probabilities) vs Teacher (probabilities)
+            # KD Loss (KL Divergence)
             kd_loss = F.kl_div(
                 F.log_softmax(student_logits, dim=-1),
-                F.softmax(teacher_logits, dim=-1),  # Teacher is detached (no grad)
+                F.softmax(teacher_logits, dim=-1),
                 reduction='batchmean'
             )
+
+            # # Start with 2.0. If training is unstable, try 4.0.
+            # temp = 2.0 
+
+            # # 2. Calculate Loss with Temperature Scaling
+            # kd_loss = F.kl_div(
+            #     F.log_softmax(student_logits / temp, dim=-1), # Divide Student by Temp
+            #     F.softmax(teacher_logits / temp, dim=-1),     # Divide Teacher by Temp
+            #     reduction='batchmean'
+            # ) * (temp ** 2)                                   # 3. Scale Loss by Temp^2
+            # self.last_kd_loss = kd_loss.item()
             
-            self.last_kd_loss = kd_loss.item()
-            
-            # EMA Update: Teacher slowly follows Student
-            # This makes teacher adapt to student's learning while staying stable
+            # EMA Update (Teacher follows Student)
             with torch.no_grad():
-                # Ensure same device/dtype for EMA
-                teacher_device = self.teacher_weight.device
-                teacher_dtype = self.teacher_weight.dtype
-                student_weight = self.wg.weight.data.to(
-                    device=teacher_device,
-                    dtype=teacher_dtype
-                )
-                
-                # EMA: teacher = decay * teacher + (1-decay) * student
-                self.teacher_weight.mul_(self.ema_decay).add_(
-                    student_weight,
-                    alpha=1.0 - self.ema_decay
-                )
+                student_w = self.wg.weight.data.to(device=teacher_w.device, dtype=teacher_w.dtype)
+                self.teacher_weight.mul_(self.ema_decay).add_(student_w, alpha=1.0 - self.ema_decay)
             
-            weighted_kd_loss = self.kd_loss_weight * kd_loss
-            
-            # Combine
-            total_loss = weighted_aux_loss + weighted_kd_loss
+            # Combine Losses
+            total_loss = weighted_aux_loss + (self.kd_loss_weight * kd_loss)
         else:
             total_loss = weighted_aux_loss
 
+        # 5. Return Combined Loss
+        # Un-indented to ensure it applies in both if/else branches
         gate_output = (total_loss,) + gate_output[1:]
         
         return gate_output
@@ -767,16 +719,6 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
                 else:
                     p.requires_grad = False
 
-
-        user_aux_weight = getattr(model_args, 'router_aux_loss_coef', 0.01)
-        # Force the Model's global multiplier to 1.0
-        # This ensures "loss += 1.0 * (weighted_aux + weighted_kd)"
-        if hasattr(self, 'router_aux_loss_coef'):
-            print(f"⚠️ Overriding global router_aux_loss_coef from {self.router_aux_loss_coef} to 1.0")
-            print(f"   (Handling weighting internally: Aux={user_aux_weight}, KD={model_args.kd_loss_weight})")
-            self.router_aux_loss_coef = 1.0
-            self.config.router_aux_loss_coef = 1.0
-
         num_layers = self.config.num_hidden_layers
 
         moe_layers_idx = model_args.moe_layers_idx
@@ -803,20 +745,26 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
             self.config.moe['num_experts'] = model_args.num_experts * len(moe_layers_idx)
         assert len(self.config.moe['num_experts']) == len(moe_layers_idx)
 
-        # Load centroids if provided
-        centroid_file = getattr(model_args, 'router_centroids_path', None)
-        all_centroids = None
-        if centroid_file:
-            print(f"Loading router centroids from: {centroid_file}")
-            all_centroids = joblib.load(centroid_file)
-            print(f"Loaded centroids for layers: {list(all_centroids.keys())}")
-        else:
-            print("⚠️  Warning: No centroids provided. Teacher will use random init.")
+        print("\n" + "="*50)
+        print("🚀 Initializing MoE Router")
+        print("="*50)
 
-        if True: #student_teacher == 
-            print(f"\n{'='*70}")
-            print("Initializing MoE Modules with Student-Teacher Routing")
-            print(f"{'='*70}\n")
+        # 1. Load Centroids
+        centroid_file = getattr(model_args, 'router_centroids_path', None)
+        all_centroids = joblib.load(centroid_file) if centroid_file else None
+        
+        # 2. Capture User Intent & Force Global Coefficient to 1.0
+        user_aux_weight = getattr(model_args, 'router_aux_loss_coef', 0.01)
+        init_mode = getattr(model_args, 'router_init_mode', 'teacher_kd')
+        
+        # If we are doing any custom weighting, we override the model's global coef
+        if init_mode != 'random' and hasattr(self, 'router_aux_loss_coef'):
+            print(f"⚠️  Overriding global router_aux_loss_coef: {self.router_aux_loss_coef} -> 1.0")
+            print(f"    (Internal Control: Aux={user_aux_weight}, KD={model_args.kd_loss_weight})")
+            self.router_aux_loss_coef = 1.0
+            self.config.router_aux_loss_coef = 1.0
+
+        moe_layers_idx = self.config.moe['moe_layers_idx']
 
         for num_experts, layer_num in zip(self.config.moe['num_experts'], moe_layers_idx):
 
@@ -824,10 +772,9 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
             original_mlp = self.model.layers[layer_num].mlp
             pretrained_state_dict = original_mlp.state_dict()
             
-            print(f"Original MLP parameters: {sum(p.numel() for p in original_mlp.parameters()):,}")
-            
+            # A. Create Standard MoE Layer
             self.model.layers[layer_num].mlp = MoE(
-                self.config.hidden_size,
+                hidden_size=self.config.hidden_size,
                 expert=original_mlp,
                 num_experts=num_experts,
                 ep_size=model_args.ep_size,
@@ -835,117 +782,88 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
                 capacity_factor=model_args.capacity_factor,
                 eval_capacity_factor=model_args.eval_capacity_factor,
                 min_capacity=model_args.min_capacity,
-                use_residual=model_args.use_residual,
+                use_residual=getattr(model_args, 'use_residual', False),
             )
+
+            layer_centroids = all_centroids[layer_num] if (all_centroids and layer_num in all_centroids) else None
+
+            # B. Handle Initialization Modes
+            if init_mode == 'random':
+                # Experiment 1: Pure Baseline. Do nothing extra. 
+                # The standard MoE layer uses random initialization and standard gate.
+                pass
+
+            elif init_mode == 'student_warm':
+                # Experiment 2: Copy centroids directly to Student. No KD Gate needed.
+                if layer_centroids is not None:
+                    print(f"Layer {layer_num}: Warm-starting Student Router directly.")
+                    with torch.no_grad():
+                        c_tensor = torch.from_numpy(layer_centroids).to(device=self.device, dtype=self.dtype)
+                        self.model.layers[layer_num].mlp.deepspeed_moe.gate.wg.weight.data.copy_(c_tensor)
+            
+            else:
+                # Experiment 3 (Default): Use KD Gate
+                kd_gate = KDTopKGate(
+                    model_dim=self.config.hidden_size,
+                    num_experts=num_experts,
+                    k=model_args.top_k_experts,
+                    centroids=layer_centroids,
+                    kd_loss_weight=getattr(model_args, 'kd_loss_weight', 0.01),
+                    aux_loss_weight=user_aux_weight,
+                    ema_decay=getattr(model_args, 'ema_decay', 0.999),
+                    # DeepSpeed args
+                    min_capacity=model_args.min_capacity,
+                    capacity_factor=model_args.capacity_factor,
+                    eval_capacity_factor=model_args.eval_capacity_factor
+                ).to(self.device)
+                
+                # Swap Gate
+                self.model.layers[layer_num].mlp.deepspeed_moe.gate = kd_gate
+
             for e in self.model.layers[layer_num].mlp.deepspeed_moe.experts.deepspeed_experts:  # check weight
                 loaded_state_dict = e.state_dict()
                 assert all([torch.allclose(pretrained_state_dict[k], v) for k, v in loaded_state_dict.items()])
                 assert all([torch.allclose(loaded_state_dict[k], v) for k, v in pretrained_state_dict.items()])
 
 
-            # 3. Copy pretrained MLP weights to all experts
-            print("Copying MLP weights to experts...")
-            copy_mlp_to_experts(
-                original_mlp=original_mlp,
-                moe_layer=self.model.layers[layer_num].mlp,
-                num_experts=num_experts,
-                verbose=False
-            )
+            # # 3. Copy pretrained MLP weights to all experts
+            # print("Copying MLP weights to experts...")
+            # copy_mlp_to_experts(
+            #     original_mlp=original_mlp,
+            #     moe_layer=self.model.layers[layer_num].mlp,
+            #     num_experts=num_experts,
+            #     verbose=False
+            # )
             
-            # Verify copying
-            verification = verify_weight_copying(
-                original_mlp=original_mlp,
-                moe_layer=self.model.layers[layer_num].mlp,
-                num_experts=num_experts,
-                verbose=False
-            )
+            # # Verify copying
+            # verification = verify_weight_copying(
+            #     original_mlp=original_mlp,
+            #     moe_layer=self.model.layers[layer_num].mlp,
+            #     num_experts=num_experts,
+            #     verbose=False
+            # )
             
-            if not verification['all_experts_match_mlp']:
-                raise RuntimeError(f"Expert weight copying failed for layer {layer_num}")
+            # if not verification['all_experts_match_mlp']:
+            #     raise RuntimeError(f"Expert weight copying failed for layer {layer_num}")
             
-            print("✓ Expert weights initialized correctly")
+            # print("✓ Expert weights initialized correctly")
 
-            # router = self.model.layers[layer_num].mlp.deepspeed_moe.gate.wg
-
-            # # load centroid file for this layer
-            # path = f"/home/prafull/scratch/MoE-LLaVA-main/router_inits/centroids_model_layers_{layer_num}_post_attention_layernorm.pt" 
-            # ckpt = torch.load(path, map_location="cpu")
-            # centroids = ckpt["centroids"]   # [num_experts, hidden_size]
-
-            # # assign to router
-            # with torch.no_grad():
-            #     router.weight.copy_(centroids)
-            # print(f"[Init] Router at layer {layer_num} initialized from {path}")
-            # 4. Inject K-Means Centroids into Router
-            if all_centroids is not None and layer_num in all_centroids:
-                print("Apply kmeans initialization")
-                router = self.model.layers[layer_num].mlp.deepspeed_moe.gate.wg
-                
-                # Convert numpy array from pkl to torch tensor
-                # Your pkl shape is [num_experts, hidden_size]
-                centroids = torch.from_numpy(all_centroids[layer_num]).to(torch.float32)
-
-                with torch.no_grad():
-                    # Ensure device and dtype match (important for bfloat16/fp16 training)
-                    router.weight.copy_(centroids.to(device=router.weight.device, dtype=router.weight.dtype))
-                
-                print(f"[Init] Router at layer {layer_num} successfully initialized from centroids.")
-            else:
-                print(f"[Init] Router at layer {layer_num} initialized randomly (no centroids found).")
-
-
-            # 4. Get centroids for this layer
-            layer_centroids = None
-            if all_centroids and layer_num in all_centroids:
-                layer_centroids = all_centroids[layer_num]
-                print(f"✓ Using K-means centroids for teacher initialization")
-                print(f"  Centroid shape: {layer_centroids.shape}")
-            else:
-                print(f"⚠️  No centroids for layer {layer_num}, using random teacher init")
             
-            # 5. Create KD Gate
-            kd_gate = KDTopKGate(
-                model_dim=self.config.hidden_size,
-                num_experts=num_experts,
-                k=model_args.top_k_experts,
-                centroids=layer_centroids,
-                kd_loss_weight=getattr(model_args, 'kd_loss_weight', 0.1),
-                aux_loss_weight=user_aux_weight,
-                ema_decay=getattr(model_args, 'ema_decay', 0.999),
-                capacity_factor=model_args.capacity_factor,
-                eval_capacity_factor=model_args.eval_capacity_factor,
-                min_capacity=model_args.min_capacity,
-                noisy_gate_policy=getattr(model_args, 'noisy_gate_policy', None),
-                drop_tokens=getattr(model_args, 'drop_tokens', True),
-                use_rts=getattr(model_args, 'use_rts', True),
-            )
-            
-            # Move gate to correct device
-            kd_gate = kd_gate.to(device=self.device, dtype=self.dtype)
-            
-            print(f"✓ KD Gate created:")
-            print(f"  Student weights: Random (PyTorch default)")
-            print(f"  Teacher weights: {'Centroids' if layer_centroids is not None else 'Random'}")
-            print(f"  KD loss weight: {kd_gate.kd_loss_weight}")
-            print(f"  EMA decay: {kd_gate.ema_decay}")
-            
-            # 6. Swap the gate in MOELayer
-            self.model.layers[layer_num].mlp.deepspeed_moe.gate = kd_gate
             
             # Verify student is random (not equal to teacher)
-            if layer_centroids is not None:
-                student_w = kd_gate.wg.weight.data
-                teacher_w = kd_gate.teacher_weight
-                max_diff = torch.max(torch.abs(student_w - teacher_w)).item()
-                print(f"\n✓ Student-Teacher difference: {max_diff:.6f}")
-                if max_diff < 1e-4:
-                    print("  ⚠️  WARNING: Student and teacher are too similar!")
-                    print("     Student should be random, not copied from teacher.")
+            # if layer_centroids is not None:
+            #     student_w = kd_gate.wg.weight.data
+            #     teacher_w = kd_gate.teacher_weight
+            #     max_diff = torch.max(torch.abs(student_w - teacher_w)).item()
+            #     print(f"\n✓ Student-Teacher difference: {max_diff:.6f}")
+            #     if max_diff < 1e-4:
+            #         print("  ⚠️  WARNING: Student and teacher are too similar!")
+            #         print("     Student should be random, not copied from teacher.")
             
-            print(f"\n✓ Layer {layer_num} MoE initialization complete")
+            
 
         print(f"\n{'='*70}")
-        print("✅ All MoE modules initialized with Student-Teacher routing")
+        print("✅ MoE Initialization Complete.\n")
         print(f"{'='*70}\n")
 
         # ipdb.set_trace()

@@ -59,8 +59,8 @@ class KDLogCallback(TrainerCallback):
                 kd_losses.append(f"L{layer_id}={loss_val:.4f}")
 
         # Print all in one line to save space
-        if kd_losses:
-            print(f"\n[Step {state.global_step}] KD Loss: " + " | ".join(kd_losses))
+        # if kd_losses:
+        #     print(f"\n[Step {state.global_step}] KD Loss: " + " | ".join(kd_losses))
 
 def rank0_print(*args):
     if local_rank == 0:
@@ -115,9 +115,14 @@ class ModelArguments:
     use_residual: bool = False
     router_aux_loss_coef: float = 0.01
 
-    router_centroids_path: Optional[str] = field(default=None)
-    kd_loss_weight: float = field(default=0.01)
-    ema_decay: float = field(default=0.999)
+    router_centroids_path: Optional[str] = field(default=None, metadata={"help": "Path to the pickle file containing K-Means centroids"})
+    
+    router_init_mode: str = field(default="teacher_kd", metadata={"help": "Initialization mode: 'random', 'student_warm', or 'teacher_kd'"})
+    
+    kd_loss_weight: float = field(default=0.01, metadata={"help": "Weight for the Knowledge Distillation loss (Teacher-Student)"})
+    
+    ema_decay: float = field(default=0.999, metadata={"help": "Exponential Moving Average decay for the Teacher weights"})
+    
     # =============================================================
 
 @dataclass

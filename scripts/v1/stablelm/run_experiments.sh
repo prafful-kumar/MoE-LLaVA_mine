@@ -3,7 +3,7 @@
 # =========================================================
 # CONFIGURATION
 # =========================================================
-GPU_IDS="0,1,2,3,4,5,6,7" # Adjust based on your available GPUs
+GPU_IDS="4,5,6,7" # Adjust based on your available GPUs
 CENTROIDS_PATH="./kmeans_trial/teacher_centroids_40000.pkl"
 BASE_OUTPUT_DIR="./checkpoints/moe_experiments"
 
