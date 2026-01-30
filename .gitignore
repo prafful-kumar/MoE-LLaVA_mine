@@ -1,3 +1,16 @@
+# HuggingFace / model caches
+cache_dir/
+**/cache_dir/
+~/.cache/huggingface/
+**/models--*/
+**/blobs/
+
+# Model checkpoints
+checkpoints/
+*.pt
+*.bin
+*.safetensors
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
