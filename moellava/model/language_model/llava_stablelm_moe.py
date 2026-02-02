@@ -44,17 +44,130 @@ import numpy as np
 from deepspeed.moe.experts import Experts
 
 local_rank = None
+# class KDTopKGate(TopKGate):
+#     """
+#     Knowledge Distillation Gate.
+#     - Teacher: Initialized with K-means centroids (or copied from student if None).
+#     - Student: Randomly initialized (learns optimal routing).
+#     - Weights: Manages Aux Loss and KD Loss internally.
+#     """
+#     def __init__(self, model_dim, num_experts, k=1, centroids=None, 
+#                  kd_loss_weight=0.01, aux_loss_weight=0.01, ema_decay=0.999, **kwargs):
+#         super().__init__(model_dim, num_experts, k, **kwargs)
+        
+#         self.kd_loss_weight = kd_loss_weight
+#         self.aux_loss_weight = aux_loss_weight
+#         self.ema_decay = ema_decay
+        
+#         # Teacher Initialization
+#         if centroids is not None:
+#             # Validate and register buffer
+#             assert centroids.shape == (num_experts, model_dim), f"Shape mismatch: {centroids.shape}"
+#             teacher_init = torch.from_numpy(centroids).float()
+#             self.register_buffer('teacher_weight', teacher_init, persistent=False)
+#             self.has_teacher = True
+#         else:
+#             # Fallback: Clone student (Effective for pure random baselines)
+#             self.register_buffer('teacher_weight', self.wg.weight.data.clone(), persistent=False)
+#             self.has_teacher = True
+        
+#         # Logging placeholders
+#         self.last_kd_loss = 0.0
+#         self.last_moe_loss = 0.0
+
+#     def forward(self, input, used_token=None, use_tutel=False):
+#         # 1. Safer Student Logits Calculation (Avoids permanent float32 cast on layer)
+#         input_fp32 = input.float()
+#         # Cast weights just for this op to avoid breaking mixed precision
+#         student_logits = F.linear(input_fp32, self.wg.weight.to(dtype=torch.float32))
+        
+#         # 2. Standard DeepSpeed Gating
+#         gate_output = super().forward(input, used_token, use_tutel)
+
+#         # 3. Handle Load Balancing Loss (Internal Weighting)
+#         raw_aux_loss = gate_output[0]
+#         weighted_aux_loss = self.aux_loss_weight * raw_aux_loss
+        
+#         # Log the raw aux loss safely
+#         if isinstance(raw_aux_loss, torch.Tensor):
+#              self.last_moe_loss = raw_aux_loss.item()
+#         else:
+#              self.last_moe_loss = 0.0
+        
+#         # 4. Knowledge Distillation (Training Only)
+#         if self.training and self.has_teacher:
+#             # Teacher Forward (No Grad)
+#             with torch.no_grad():
+#                 teacher_w = self.teacher_weight.to(device=input_fp32.device, dtype=input_fp32.dtype)
+#                 teacher_logits = F.linear(input_fp32, teacher_w)
+            
+#             # KD Loss (KL Divergence)
+#             kd_loss = F.kl_div(
+#                 F.log_softmax(student_logits, dim=-1),
+#                 F.softmax(teacher_logits, dim=-1),
+#                 reduction='batchmean'
+#             )
+
+#             # # Start with 2.0. If training is unstable, try 4.0.
+#             # temp = 2.0 
+
+#             # # 2. Calculate Loss with Temperature Scaling
+#             # kd_loss = F.kl_div(
+#             #     F.log_softmax(student_logits / temp, dim=-1), # Divide Student by Temp
+#             #     F.softmax(teacher_logits / temp, dim=-1),     # Divide Teacher by Temp
+#             #     reduction='batchmean'
+#             # ) * (temp ** 2)                                   # 3. Scale Loss by Temp^2
+            
+#             self.last_kd_loss = kd_loss.item()
+            
+#             # EMA Update (Teacher follows Student)
+#             with torch.no_grad():
+#                 student_w = self.wg.weight.data.to(device=teacher_w.device, dtype=teacher_w.dtype)
+#                 self.teacher_weight.mul_(self.ema_decay).add_(student_w, alpha=1.0 - self.ema_decay)
+            
+#             # Combine Losses
+#             total_loss = weighted_aux_loss + (self.kd_loss_weight * kd_loss)
+#         else:
+#             total_loss = weighted_aux_loss
+
+#         # 5. Return Combined Loss
+#         # Un-indented to ensure it applies in both if/else branches
+#         gate_output = (total_loss,) + gate_output[1:]
+        
+#         return gate_output
+    
+#     def get_loss_dict(self):
+#         """Return dictionary of losses for logging"""
+#         return {
+#             'moe_loss': self.last_moe_loss,
+#             'kd_loss': self.last_kd_loss,
+#             'total_aux_loss': self.last_moe_loss + self.kd_loss_weight * self.last_kd_loss
+#         }
+    
+#     def disable_teacher(self):
+#         """
+#         Disable teacher for inference or before saving checkpoint.
+#         Call this after training is complete.
+#         """
+#         if self.has_teacher:
+#             self.teacher_weight = None
+#             self.has_teacher = False
+#             torch.cuda.empty_cache()
+
 class KDTopKGate(TopKGate):
     """
     Knowledge Distillation Gate.
-    - Teacher: Initialized with K-means centroids (or copied from student if None).
-    - Student: Randomly initialized (learns optimal routing).
-    - Weights: Manages Aux Loss and KD Loss internally.
+    - Teacher: Initialized with K-means centroids.
+    - Student: Randomly initialized.
+    - Features: T^2 Loss Scaling, EMA Weights, Dynamic Hyperparameters.
     """
     def __init__(self, model_dim, num_experts, k=1, centroids=None, 
-                 kd_loss_weight=0.01, aux_loss_weight=0.01, ema_decay=0.999, **kwargs):
+                 temperature=2.0, kd_loss_weight=0.01, aux_loss_weight=0.01, ema_decay=0.999, 
+                 **kwargs):
         super().__init__(model_dim, num_experts, k, **kwargs)
         
+        # Hyperparameters (Stored as attributes so they can be updated)
+        self.temperature = temperature
         self.kd_loss_weight = kd_loss_weight
         self.aux_loss_weight = aux_loss_weight
         self.ema_decay = ema_decay
@@ -62,12 +175,17 @@ class KDTopKGate(TopKGate):
         # Teacher Initialization
         if centroids is not None:
             # Validate and register buffer
+            # Ensure input is a tensor
+            if not isinstance(centroids, torch.Tensor):
+                centroids = torch.from_numpy(centroids)
+            
             assert centroids.shape == (num_experts, model_dim), f"Shape mismatch: {centroids.shape}"
-            teacher_init = torch.from_numpy(centroids).float()
+            
+            teacher_init = centroids.float()
             self.register_buffer('teacher_weight', teacher_init, persistent=False)
             self.has_teacher = True
         else:
-            # Fallback: Clone student (Effective for pure random baselines)
+            # Fallback
             self.register_buffer('teacher_weight', self.wg.weight.data.clone(), persistent=False)
             self.has_teacher = True
         
@@ -75,20 +193,34 @@ class KDTopKGate(TopKGate):
         self.last_kd_loss = 0.0
         self.last_moe_loss = 0.0
 
+    def update_hyperparameters(self, temperature=None, kd_loss_weight=None, ema_decay=None):
+        """
+        External hook for the Trainer Callback to update schedules.
+        """
+        if temperature is not None:
+            self.temperature = temperature
+        if kd_loss_weight is not None:
+            self.kd_loss_weight = kd_loss_weight
+        if ema_decay is not None:
+            self.ema_decay = ema_decay
+
     def forward(self, input, used_token=None, use_tutel=False):
-        # 1. Safer Student Logits Calculation (Avoids permanent float32 cast on layer)
+        # 1. Safer Student Logits Calculation
         input_fp32 = input.float()
-        # Cast weights just for this op to avoid breaking mixed precision
-        student_logits = F.linear(input_fp32, self.wg.weight.to(dtype=torch.float32))
+        
+        # Ensure student weights are float32 for this op
+        if self.wg.weight.dtype != torch.float32:
+            self.wg = self.wg.float()
+        
+        student_logits = self.wg(input_fp32)
         
         # 2. Standard DeepSpeed Gating
         gate_output = super().forward(input, used_token, use_tutel)
 
-        # 3. Handle Load Balancing Loss (Internal Weighting)
+        # 3. Handle Load Balancing Loss
         raw_aux_loss = gate_output[0]
         weighted_aux_loss = self.aux_loss_weight * raw_aux_loss
         
-        # Log the raw aux loss safely
         if isinstance(raw_aux_loss, torch.Tensor):
              self.last_moe_loss = raw_aux_loss.item()
         else:
@@ -101,25 +233,20 @@ class KDTopKGate(TopKGate):
                 teacher_w = self.teacher_weight.to(device=input_fp32.device, dtype=input_fp32.dtype)
                 teacher_logits = F.linear(input_fp32, teacher_w)
             
-            # KD Loss (KL Divergence)
+            # Retrieve Current Temperature
+            T = self.temperature
+
+            # KD Loss (KL Divergence with T^2 Scaling)
+            # We use T^2 to preserve gradient magnitude (Hinton et al.)
             kd_loss = F.kl_div(
-                F.log_softmax(student_logits, dim=-1),
-                F.softmax(teacher_logits, dim=-1),
+                F.log_softmax(student_logits / T, dim=-1),
+                F.softmax(teacher_logits / T, dim=-1),
                 reduction='batchmean'
-            )
-
-            # # Start with 2.0. If training is unstable, try 4.0.
-            # temp = 2.0 
-
-            # # 2. Calculate Loss with Temperature Scaling
-            # kd_loss = F.kl_div(
-            #     F.log_softmax(student_logits / temp, dim=-1), # Divide Student by Temp
-            #     F.softmax(teacher_logits / temp, dim=-1),     # Divide Teacher by Temp
-            #     reduction='batchmean'
-            # ) * (temp ** 2)                                   # 3. Scale Loss by Temp^2
-            # self.last_kd_loss = kd_loss.item()
+            ) * (T ** 2)
             
-            # EMA Update (Teacher follows Student)
+            self.last_kd_loss = kd_loss.item()
+            
+            # EMA Update: Teacher = decay * Teacher + (1-decay) * Student
             with torch.no_grad():
                 student_w = self.wg.weight.data.to(device=teacher_w.device, dtype=teacher_w.dtype)
                 self.teacher_weight.mul_(self.ema_decay).add_(student_w, alpha=1.0 - self.ema_decay)
@@ -130,24 +257,20 @@ class KDTopKGate(TopKGate):
             total_loss = weighted_aux_loss
 
         # 5. Return Combined Loss
-        # Un-indented to ensure it applies in both if/else branches
         gate_output = (total_loss,) + gate_output[1:]
         
         return gate_output
     
     def get_loss_dict(self):
-        """Return dictionary of losses for logging"""
         return {
             'moe_loss': self.last_moe_loss,
             'kd_loss': self.last_kd_loss,
-            'total_aux_loss': self.last_moe_loss + self.kd_loss_weight * self.last_kd_loss
+            'total_aux_loss': self.last_moe_loss + self.kd_loss_weight * self.last_kd_loss,
+            'temperature': self.temperature,
+            'ema_decay': self.ema_decay
         }
     
     def disable_teacher(self):
-        """
-        Disable teacher for inference or before saving checkpoint.
-        Call this after training is complete.
-        """
         if self.has_teacher:
             self.teacher_weight = None
             self.has_teacher = False
@@ -756,11 +879,18 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
         # 2. Capture User Intent & Force Global Coefficient to 1.0
         user_aux_weight = getattr(model_args, 'router_aux_loss_coef', 0.01)
         init_mode = getattr(model_args, 'router_init_mode', 'teacher_kd')
+
+        # Retrieve Initial Hyperparameters (Safe Defaults using getattr)
+        # Note: We look for 'router_weight_start' which matches our bash script/RouterArguments
+        initial_kd_weight = getattr(model_args, 'router_weight_start', 0.5)
+        initial_temp = getattr(model_args, 'router_temp_start', 4.0)
+        initial_ema = getattr(model_args, 'router_ema_start', 0.999)
         
         # If we are doing any custom weighting, we override the model's global coef
         if init_mode != 'random' and hasattr(self, 'router_aux_loss_coef'):
             print(f"⚠️  Overriding global router_aux_loss_coef: {self.router_aux_loss_coef} -> 1.0")
-            print(f"    (Internal Control: Aux={user_aux_weight}, KD={model_args.kd_loss_weight})")
+            # FIXED: Used initial_kd_weight variable instead of model_args.kd_loss_weight
+            print(f"    (Internal Control: Aux={user_aux_weight}, KD={initial_kd_weight})")
             self.router_aux_loss_coef = 1.0
             self.config.router_aux_loss_coef = 1.0
 
@@ -808,9 +938,11 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
                     num_experts=num_experts,
                     k=model_args.top_k_experts,
                     centroids=layer_centroids,
-                    kd_loss_weight=getattr(model_args, 'kd_loss_weight', 0.01),
+                    # Dynamic Param Init
+                    temperature=initial_temp,
+                    kd_loss_weight=initial_kd_weight,
+                    ema_decay=initial_ema,
                     aux_loss_weight=user_aux_weight,
-                    ema_decay=getattr(model_args, 'ema_decay', 0.999),
                     # DeepSpeed args
                     min_capacity=model_args.min_capacity,
                     capacity_factor=model_args.capacity_factor,

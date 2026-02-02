@@ -41,6 +41,8 @@ from moellava.mm_utils import tokenizer_image_token
 from PIL import Image
 from moellava.utils import order_pick_k
 
+from moellava.train.router_callback import RouterDistillationCallback
+
 local_rank = None
 
 
@@ -66,6 +68,15 @@ def rank0_print(*args):
     if local_rank == 0:
         print(*args)
 
+@dataclass
+class RouterArguments:
+    router_temp_start: float = field(default=4.0, metadata={"help": "Starting temperature for router KD"})
+    router_temp_end: float = field(default=1.0, metadata={"help": "Ending temperature for router KD"})
+    router_weight_start: float = field(default=0.5, metadata={"help": "Starting KD loss weight"})
+    router_weight_end: float = field(default=0.05, metadata={"help": "Ending KD loss weight"})
+    router_ema_start: float = field(default=0.999, metadata={"help": "Starting EMA decay (Stable)"})
+    router_ema_end: float = field(default=0.95, metadata={"help": "Ending EMA decay (Adaptive)"})
+    router_total_steps: Optional[int] = field(default=13860, metadata={"help": "Total steps for schedule"})
 
 @dataclass
 class ModelArguments:
@@ -119,9 +130,9 @@ class ModelArguments:
     
     router_init_mode: str = field(default="teacher_kd", metadata={"help": "Initialization mode: 'random', 'student_warm', or 'teacher_kd'"})
     
-    kd_loss_weight: float = field(default=0.01, metadata={"help": "Weight for the Knowledge Distillation loss (Teacher-Student)"})
+    # kd_loss_weight: float = field(default=0.01, metadata={"help": "Weight for the Knowledge Distillation loss (Teacher-Student)"})
     
-    ema_decay: float = field(default=0.999, metadata={"help": "Exponential Moving Average decay for the Teacher weights"})
+    # ema_decay: float = field(default=0.999, metadata={"help": "Exponential Moving Average decay for the Teacher weights"})
     
     # =============================================================
 
@@ -1171,8 +1182,8 @@ def train():
     global local_rank
 
     parser = transformers.HfArgumentParser(
-        (ModelArguments, DataArguments, TrainingArguments))
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+        (ModelArguments, DataArguments, TrainingArguments, RouterArguments))
+    model_args, data_args, training_args, router_args = parser.parse_args_into_dataclasses()
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
@@ -1555,16 +1566,34 @@ def train():
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
+                                              
+    # Initialize Callback with arguments from bash
+    router_callback = RouterDistillationCallback(
+        total_steps=router_args.router_total_steps,
+        temp_start=router_args.router_temp_start, 
+        temp_end=router_args.router_temp_end,
+        weight_start=router_args.router_weight_start, 
+        weight_end=router_args.router_weight_end,
+        ema_start=router_args.router_ema_start, 
+        ema_end=router_args.router_ema_end
+    )
+
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,
                     args=training_args,
-                    callbacks=[KDLogCallback],
+                    callbacks=[router_callback],#KDLogCallback,
                     **data_module)
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)
     else:
         trainer.train()
+
+    # 5. Clean up Teacher weights before saving final model
+    # (Assuming you added the helper function I provided earlier)
+    from moellava.model.llava_stablelm_moe import remove_teachers_before_save
+    remove_teachers_before_save(model)
+
     trainer.save_state()
 
     model.config.use_cache = True

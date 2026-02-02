@@ -10,13 +10,16 @@ CKPT_FOLDERS=(
 #   "random_no_KD_0_aux"
 #   "random_no_KD_0.1_aux"
 #   "random_no_KD_0.5_aux"
-"kmeans_5000"
-"kmeans_5000_KD_0.1_EMA_0.999_NOaux"
-"kmeans_5000_large_BS_KD_0.1_EMA_0.999_NOaux"
-"kmeans_20000_KD_0.1_EMA_0.999_NOaux"
-"kmeans_40000"
-"kmeans_40000_KD_second_time_NOaux"
-"random_no_KD_0.01_aux"
+# "kmeans_5000"
+# "kmeans_5000_KD_0.1_EMA_0.999_NOaux"
+# "kmeans_5000_large_BS_KD_0.1_EMA_0.999_NOaux"
+# "kmeans_20000_KD_0.1_EMA_0.999_NOaux"
+# "kmeans_40000"
+# "kmeans_40000_KD_second_time_NOaux"
+# "random_no_KD_0.01_aux"
+# "kmeans_40000_KD_0.1_EMA_0.7_NOaux"
+# "kmeans_40000_KD_0.1_EMA_0.8_NOaux"
+"kmeans_40000_dyn_hyp"
 )
 
 for CKPT_FOLDER in "${CKPT_FOLDERS[@]}"; do
@@ -24,7 +27,7 @@ for CKPT_FOLDER in "${CKPT_FOLDERS[@]}"; do
 
     echo "Evaluating checkpoint folder: ${CKPT_FOLDER}"
 
-    deepspeed --include localhost:7 --master_port $((1 + 29501)) \
+    deepspeed --include localhost:5 --master_port $((1 + 29501)) \
         moellava/eval/model_vqa_science.py \
         --model-path ${CKPT} \
         --question-file ${EVAL}/scienceqa/llava_test_CQM-A.json \

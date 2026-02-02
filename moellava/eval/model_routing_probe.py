@@ -124,7 +124,7 @@ def eval_model_probe(args):
             )
 
     if args.return_gating_logit:
-        save_path = f'{args.return_gating_logit}.pt'
+        save_path = f'{args.return_gating_logit}'
         torch.save(all_gating_logits, save_path)
         print(f"✅ Saved analysis data (with layer mapping) to {save_path}")
 
