@@ -58,7 +58,7 @@ for CKPT_FOLDER in "${CKPT_FOLDERS[@]}"; do
 
     # 1. Run routing probe (once per checkpoint)
     HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
-    deepspeed --include localhost:5 --master_port $((RANDOM % 10000 + 20000)) \
+    deepspeed --include localhost:3 --master_port $((RANDOM % 10000 + 20000)) \
         moellava/eval/model_routing_probe.py \
         --model-path ${CKPT_PATH} \
         --question-file ${DIAG_DATA_DIR}/diagnostic_data.json \
@@ -72,7 +72,7 @@ for CKPT_FOLDER in "${CKPT_FOLDERS[@]}"; do
         echo "  → Analyzing layer ${layer_idx}"
         python moellava/vis/vis_dual_routing.py \
             --input ${ROUTING_PT} \
-            --output dual/${CKPT_FOLDER} \
+            --output dual_hard_allocation/${CKPT_FOLDER} \
             --layer_idx ${layer_idx}
     done
 done

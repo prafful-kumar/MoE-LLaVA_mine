@@ -42,11 +42,26 @@ from PIL import Image
 from moellava.utils import order_pick_k
 
 from moellava.train.router_callback import RouterDistillationCallback
+from moellava.model.language_model.llava_stablelm_moe import remove_teachers_before_save
 
 local_rank = None
 
 
 from transformers import TrainerCallback
+
+
+class EarlyDenseCheckpointCallback(TrainerCallback):
+    def on_step_end(self, args, state, control, **kwargs):
+        
+        # Save at step 1 (baseline: untrained/just initialized)
+        if state.global_step == 1:
+            control.should_save = True
+        
+        # Save every 100 steps for first 1000 steps
+        if state.global_step <= 1000 and state.global_step % 100 == 0:
+            control.should_save = True
+            
+        return control
 
 class KDLogCallback(TrainerCallback):
     def on_log(self, args, state, control, model=None, logs=None, **kwargs):
@@ -1567,6 +1582,22 @@ def train():
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
                                               
+
+    print("\n" + "="*40)
+    print("🚀 ROUTER DISTILLATION CONFIGURATION")
+    print("="*40)
+
+    # Handle the case where total_steps is None
+    steps_display = router_args.router_total_steps
+    if steps_display is None:
+        steps_display = "None (Will be auto-calculated from Trainer)"
+
+    print(f"  • Total Steps : {steps_display}")
+    print(f"  • Temperature : {router_args.router_temp_start} → {router_args.router_temp_end}")
+    print(f"  • Loss Weight : {router_args.router_weight_start} → {router_args.router_weight_end}")
+    print(f"  • Teacher EMA : {router_args.router_ema_start} → {router_args.router_ema_end}")
+    print("="*40 + "\n")
+                                        
     # Initialize Callback with arguments from bash
     router_callback = RouterDistillationCallback(
         total_steps=router_args.router_total_steps,
@@ -1581,7 +1612,7 @@ def train():
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,
                     args=training_args,
-                    callbacks=[router_callback],#KDLogCallback,
+                    callbacks=[router_callback, EarlyDenseCheckpointCallback()],#KDLogCallback,
                     **data_module)
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
@@ -1591,7 +1622,6 @@ def train():
 
     # 5. Clean up Teacher weights before saving final model
     # (Assuming you added the helper function I provided earlier)
-    from moellava.model.llava_stablelm_moe import remove_teachers_before_save
     remove_teachers_before_save(model)
 
     trainer.save_state()

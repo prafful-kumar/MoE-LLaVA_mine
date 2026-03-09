@@ -44,7 +44,7 @@ set -e
 # CONFIG
 ############################
 
-gpu_list="2,3,5"
+gpu_list="2,3,4,5"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
 CHUNKS=${#GPULIST[@]}
 
@@ -68,7 +68,11 @@ CKPT_FOLDERS=(
   # "random_no_KD_0.01_aux"
   # "kmeans_40000_KD_0.1_EMA_0.7_NOaux"
   # "kmeans_40000_KD_0.1_EMA_0.8_NOaux"
-  "kmeans_40000_dyn_hyp"
+  # "kmeans_40000_dyn_hyp"
+  "DYN_HYP_KMeans40k-T1.0_0.6-W0.1_0.01-E0.999_0.5"
+  "DYN_HYP_KMeans40k-T1.0_0.6-W0.1_0.01-E0.999_0.9"
+  "DYN_HYP_KMeans40k-T2.0_0.6-W0.1_0.01-E0.999_0.9"
+  "DYN_HYP_KMeans40k-T2.0_1.0-W0.1_0.01-E0.999_0.9"
 )
 
 ############################

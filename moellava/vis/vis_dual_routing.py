@@ -129,8 +129,27 @@ def visualize_dual_routing(args):
     ax4 = fig.add_subplot(gs[1, 1])
     plot_scatter(ax4, X_txt_2d, exp_txt, 'expert', "TEXT: Routing Decisions\n(Colors = Experts)")
 
-    # === PREFS CALCULATION ===
+    # # === PREFS CALCULATION ===
+    # def get_prefs(samples, labels):
+    #     data_dict = defaultdict(list)
+    #     for i, (vec, _) in enumerate(samples):
+    #         data_dict[labels[i]].append(vec)
+            
+    #     prefs = {}
+    #     for cat in categories:
+    #         if cat in data_dict:
+    #             logits = np.array(data_dict[cat])
+    #             shift = logits - np.max(logits, axis=1, keepdims=True)
+    #             exps = np.exp(shift)
+    #             probs = exps / np.sum(exps, axis=1, keepdims=True)
+    #             prefs[cat] = probs.mean(axis=0)
+    #         else:
+    #             prefs[cat] = np.zeros(num_experts)
+    #     return prefs
+    
+    # [FIX] Change from Soft Probability to Hard Allocation Counts
     def get_prefs(samples, labels):
+        # 1. Extract Vectors and Categories
         data_dict = defaultdict(list)
         for i, (vec, _) in enumerate(samples):
             data_dict[labels[i]].append(vec)
@@ -139,10 +158,24 @@ def visualize_dual_routing(args):
         for cat in categories:
             if cat in data_dict:
                 logits = np.array(data_dict[cat])
-                shift = logits - np.max(logits, axis=1, keepdims=True)
-                exps = np.exp(shift)
-                probs = exps / np.sum(exps, axis=1, keepdims=True)
-                prefs[cat] = probs.mean(axis=0)
+                
+                # --- OLD CODE (Soft Probability) ---
+                # shift = logits - np.max(logits, axis=1, keepdims=True)
+                # exps = np.exp(shift)
+                # probs = exps / np.sum(exps, axis=1, keepdims=True)
+                # prefs[cat] = probs.mean(axis=0) 
+                
+                # --- NEW CODE (Hard Allocation) ---
+                # 1. Find who actually won (argmax)
+                winners = np.argmax(logits, axis=1)
+                
+                # 2. Count wins per expert
+                counts = np.bincount(winners, minlength=num_experts)
+                
+                # 3. Convert to Percentage
+                total = len(winners)
+                prefs[cat] = counts / (total + 1e-6) # Add epsilon for safety
+                
             else:
                 prefs[cat] = np.zeros(num_experts)
         return prefs

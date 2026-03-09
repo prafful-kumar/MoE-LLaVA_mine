@@ -1,0 +1,13 @@
+Attempting to run the script... Output is being saved to student_only_training_norm_fisher_first_temp_1-0.6_ema_0.7.log
+Script finished successfully without a CUDA out of memory error.
+Loop terminated. Exiting.
+Attempting to run the script... Output is being saved to fisher_init_TS_no_training_norm_OnlyInitNorm.log
+Script failed with a different error. Check fisher_init_TS_no_training_norm_OnlyInitNorm.log for details.
+Loop terminated. Exiting.
+Attempting to run the script... Output is being saved to fisher_init_TS_no_training_norm_OnlyInitNorm.log
+Script failed with a different error. Check fisher_init_TS_no_training_norm_OnlyInitNorm.log for details.
+scripts/v1/stablelm/run_multiple.sh: line 30: one: command not found
+Loop terminated. Exiting.
+Attempting to run the script... Output is being saved to fisher_no_norm_input_norm_weight_during_training.log
+Script finished successfully without a CUDA out of memory error.
+Loop terminated. Exiting.

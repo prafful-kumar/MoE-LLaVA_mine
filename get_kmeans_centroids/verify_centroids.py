@@ -30,4 +30,4 @@ def verify(path):
             print("  WARNING: Experts are nearly identical. Clusters might not have converged.")
 
 if __name__ == "__main__":
-    verify("kmeans_trial/kmeans_trial/teacher_centroids_5000_large_BS.pkl")
+    verify("get_kmeans_centroids/kmeans_trial/teacher_centroids_40000.pkl")

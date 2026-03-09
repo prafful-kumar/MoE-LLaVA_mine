@@ -19,7 +19,16 @@ CKPT_FOLDERS=(
 # "random_no_KD_0.01_aux"
 # "kmeans_40000_KD_0.1_EMA_0.7_NOaux"
 # "kmeans_40000_KD_0.1_EMA_0.8_NOaux"
-"kmeans_40000_dyn_hyp"
+# "kmeans_40000_dyn_hyp"
+#   "DYN_HYP_KMeans40k-T1.0_0.6-W0.1_0.01-E0.999_0.5"
+#   "DYN_HYP_KMeans40k-T1.0_0.6-W0.1_0.01-E0.999_0.9"
+  # "DYN_HYP_KMeans40k-T2.0_0.6-W0.1_0.01-E0.999_0.9"
+  # "DYN_HYP_KMeans40k-T2.0_1.0-W0.1_0.01-E0.999_0.9"
+#   "training_norm_./DYN_HYP_Fisher5k-T1.0_0.6-W0.1_0.01-E0.999_0.7"
+# "training_norm_./DYN_HYP_KMeans40k-T1.0_0.6-W0.1_0.01-E0.999_0.7"
+"student_only_training_norm_./DYN_HYP_Fisher5k-T1.0_0.6-W0.1_0.01-E0.999_0.7" #60.05
+"fisher_no_norm_input_norm_weight_during_training_./DYN_HYP_Fisher5k-T1.0_0.6-W0.1_0.01-E0.999_0.998" # 59.72
+"fisher_init_TS_no_training_norm_OnlyInitNorm./DYN_HYP_Fisher5k-T1.0_0.6-W0.1_0.01-E0.999_0.998" #60.00
 )
 
 for CKPT_FOLDER in "${CKPT_FOLDERS[@]}"; do
@@ -27,8 +36,7 @@ for CKPT_FOLDER in "${CKPT_FOLDERS[@]}"; do
 
     echo "Evaluating checkpoint folder: ${CKPT_FOLDER}"
 
-    deepspeed --include localhost:5 --master_port $((1 + 29501)) \
-        moellava/eval/model_vqa_science.py \
+    deepspeed --include localhost:0 --master_port $((RANDOM % 10000 + 20000)) moellava/eval/model_vqa_science.py \
         --model-path ${CKPT} \
         --question-file ${EVAL}/scienceqa/llava_test_CQM-A.json \
         --image-folder ${EVAL}/scienceqa/images/test \

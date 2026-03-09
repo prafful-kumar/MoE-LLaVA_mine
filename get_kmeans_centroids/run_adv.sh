@@ -2,16 +2,27 @@
 
 JSON_FOLDER="train_json"
 IMAGE_FOLDER="IMAGE_FOLDER"
-cd kmeans_trial
+cd get_kmeans_centroids
 
-CUDA_VISIBLE_DEVICES=1 taskset -c 20-29 python get_centroids_adv.py \
+# CUDA_VISIBLE_DEVICES=1 taskset -c 20-29 python get_centroids_adv.py \
+#     --model_path /home/prafull/scratch/MoE-LLaVA-main/checkpoints/MoE-LLaVA-StableLM-Stage2 \
+#     --data_path /home/prafull/scratch/MoE-LLaVA-main/${JSON_FOLDER}/llava_image_tune_.json /home/prafull/scratch/MoE-LLaVA-main/${JSON_FOLDER}/nlp_tune.json \
+#     --image_folder /home/prafull/scratch/MoE-LLaVA-main/${IMAGE_FOLDER} \
+#     --output_file kmeans_trial/teacher_centroids_5000_large_BS.pkl \
+#     --num_experts 4 \
+#     --num_samples 5000 \
+#     --buffer_size 40000 \
+#     --version stablelm \
+#     --image_aspect_ratio pad \
+#     --batch_size 20
+
+# mkdir -p fisher_directions
+
+CUDA_VISIBLE_DEVICES=3 taskset -c 20-29 python compute_fisher_directions.py \
     --model_path /home/prafull/scratch/MoE-LLaVA-main/checkpoints/MoE-LLaVA-StableLM-Stage2 \
     --data_path /home/prafull/scratch/MoE-LLaVA-main/${JSON_FOLDER}/llava_image_tune_.json /home/prafull/scratch/MoE-LLaVA-main/${JSON_FOLDER}/nlp_tune.json \
     --image_folder /home/prafull/scratch/MoE-LLaVA-main/${IMAGE_FOLDER} \
-    --output_file kmeans_trial/teacher_centroids_5000_large_BS.pkl \
+    --output_file fisher_directions/40000.pkl \
     --num_experts 4 \
-    --num_samples 5000 \
-    --buffer_size 40000 \
-    --version stablelm \
-    --image_aspect_ratio pad \
-    --batch_size 20
+    --init_method fisher \
+    --num_samples 40000
