@@ -143,7 +143,7 @@ class ModelArguments:
 
     router_centroids_path: Optional[str] = field(default=None, metadata={"help": "Path to the pickle file containing K-Means centroids"})
     
-    router_init_mode: str = field(default="teacher_kd", metadata={"help": "Initialization mode: 'random', 'student_warm', or 'teacher_kd'"})
+    router_init_mode: str = field(default=None, metadata={"help": "Initialization mode: 'random', 'student_warm', or 'teacher_kd'"})
     
     # kd_loss_weight: float = field(default=0.01, metadata={"help": "Weight for the Knowledge Distillation loss (Teacher-Student)"})
     
@@ -1583,36 +1583,36 @@ def train():
                                               data_args=data_args)
                                               
 
-    print("\n" + "="*40)
-    print("🚀 ROUTER DISTILLATION CONFIGURATION")
-    print("="*40)
+    # print("\n" + "="*40)
+    # print("🚀 ROUTER DISTILLATION CONFIGURATION")
+    # print("="*40)
 
-    # Handle the case where total_steps is None
-    steps_display = router_args.router_total_steps
-    if steps_display is None:
-        steps_display = "None (Will be auto-calculated from Trainer)"
+    # # Handle the case where total_steps is None
+    # steps_display = router_args.router_total_steps
+    # if steps_display is None:
+    #     steps_display = "None (Will be auto-calculated from Trainer)"
 
-    print(f"  • Total Steps : {steps_display}")
-    print(f"  • Temperature : {router_args.router_temp_start} → {router_args.router_temp_end}")
-    print(f"  • Loss Weight : {router_args.router_weight_start} → {router_args.router_weight_end}")
-    print(f"  • Teacher EMA : {router_args.router_ema_start} → {router_args.router_ema_end}")
-    print("="*40 + "\n")
+    # print(f"  • Total Steps : {steps_display}")
+    # print(f"  • Temperature : {router_args.router_temp_start} → {router_args.router_temp_end}")
+    # print(f"  • Loss Weight : {router_args.router_weight_start} → {router_args.router_weight_end}")
+    # print(f"  • Teacher EMA : {router_args.router_ema_start} → {router_args.router_ema_end}")
+    # print("="*40 + "\n")
                                         
     # Initialize Callback with arguments from bash
-    router_callback = RouterDistillationCallback(
-        total_steps=router_args.router_total_steps,
-        temp_start=router_args.router_temp_start, 
-        temp_end=router_args.router_temp_end,
-        weight_start=router_args.router_weight_start, 
-        weight_end=router_args.router_weight_end,
-        ema_start=router_args.router_ema_start, 
-        ema_end=router_args.router_ema_end
-    )
+    # router_callback = RouterDistillationCallback(
+    #     total_steps=router_args.router_total_steps,
+    #     temp_start=router_args.router_temp_start, 
+    #     temp_end=router_args.router_temp_end,
+    #     weight_start=router_args.router_weight_start, 
+    #     weight_end=router_args.router_weight_end,
+    #     ema_start=router_args.router_ema_start, 
+    #     ema_end=router_args.router_ema_end
+    # )
 
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,
                     args=training_args,
-                    callbacks=[router_callback, EarlyDenseCheckpointCallback()],#KDLogCallback,
+                    callbacks=[ EarlyDenseCheckpointCallback()],#KDLogCallback,
                     **data_module)
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):

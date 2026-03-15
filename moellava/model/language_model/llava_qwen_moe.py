@@ -12,7 +12,7 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Dict
 
 import torch
 import torch.nn as nn
@@ -29,6 +29,10 @@ from .qwen.tokenization_qwen import QWenTokenizer
 from ..llava_arch import LlavaMetaModel, LlavaQWenMetaForCausalLM
 import torch.distributed as dist
 
+from .normalized_router_flexible import SimplifiedNormalizedGate, NormalizedKDTopKGate
+import os
+import joblib
+import numpy as np
 
 local_rank = None
 
@@ -515,7 +519,7 @@ class MoELLaVAQWenForCausalLM(QWenLMHeadModel, LlavaQWenMetaForCausalLM):
                     moe_losses.append(moe_loss)
             moe_loss = self.router_aux_loss_coef * sum(moe_losses)
             if labels is not None:
-                print(loss, moe_loss, loss + moe_loss)
+                # print(loss, moe_loss, loss + moe_loss)
                 loss += moe_loss
 
         if not return_dict:
@@ -592,27 +596,141 @@ class MoELLaVAQWenForCausalLM(QWenLMHeadModel, LlavaQWenMetaForCausalLM):
             self.config.moe['num_experts'] = model_args.num_experts * len(moe_layers_idx)
         assert len(self.config.moe['num_experts']) == len(moe_layers_idx)
 
+        # for num_experts, layer_num in zip(self.config.moe['num_experts'], moe_layers_idx):
+        #     pretrained_state_dict = self.transformer.h[layer_num].mlp.state_dict()
+        #     self.transformer.h[layer_num].mlp = MoE(
+        #         self.config.hidden_size,
+        #         expert=self.transformer.h[layer_num].mlp,
+        #         num_experts=num_experts,
+        #         ep_size=model_args.ep_size,
+        #         k=model_args.top_k_experts,
+        #         capacity_factor=model_args.capacity_factor,
+        #         eval_capacity_factor=model_args.eval_capacity_factor,
+        #         min_capacity=model_args.min_capacity,
+        #         use_residual=model_args.use_residual,
+        #     )
+        #     for e in self.transformer.h[layer_num].mlp.deepspeed_moe.experts.deepspeed_experts:  # check weight
+        #         loaded_state_dict = e.state_dict()
+        #         assert all([torch.allclose(pretrained_state_dict[k], v) for k, v in loaded_state_dict.items()])
+        #         assert all([torch.allclose(loaded_state_dict[k], v) for k, v in pretrained_state_dict.items()])
+        
+        print("\n" + "="*50)
+        print("🚀 Initializing Qwen MoE Router")
+        print("="*50)
+        
+        # 1. Load Centroids (support both naming conventions safely)
+        centroid_file = getattr(model_args, 'router_centroids_path', getattr(model_args, 'router_init_path', None))
+        all_centroids = joblib.load(centroid_file) if centroid_file and os.path.exists(centroid_file) else None
+        
+        # 2. Capture User Intent & Force Global Coefficient to 1.0
+        user_aux_weight = getattr(model_args, 'router_aux_loss_coef', 0.01)
+        init_mode = getattr(model_args, 'router_init_mode', None)
+
+        initial_kd_weight = getattr(model_args, 'router_weight_start', 0.01)
+        initial_temp = getattr(model_args, 'router_temp_start', 1.0)
+        initial_ema = getattr(model_args, 'router_ema_start', 0.999)
+
+        print("\n" + "="*50)
+        print("printing all the hyperparameters : ")
+        print("="*50)
+        print("centroid_file = ",centroid_file)
+        print("user_aux_weight = ",user_aux_weight)
+        print("init_mode = ",init_mode)
+        print("KD weight = ",initial_kd_weight)
+        print("temperature = ",initial_temp)
+        print("initial_ema = ",initial_ema)
+        
+        if init_mode != 'random' and hasattr(self, 'router_aux_loss_coef'):
+            print(f"⚠️  Overriding global router_aux_loss_coef: {self.router_aux_loss_coef} -> 1.0")
+            print(f"    (Internal Control: Aux={user_aux_weight}, KD={initial_kd_weight})")
+            self.router_aux_loss_coef = 1.0
+            self.config.router_aux_loss_coef = 1.0
+
         for num_experts, layer_num in zip(self.config.moe['num_experts'], moe_layers_idx):
-            pretrained_state_dict = self.transformer.h[layer_num].mlp.state_dict()
+
+            # 1. Save original MLP state for expert initialization (QWEN PATH)
+            original_mlp = self.transformer.h[layer_num].mlp
+            pretrained_state_dict = original_mlp.state_dict()
+            
+            # A. Create Standard MoE Layer (QWEN PATH)
             self.transformer.h[layer_num].mlp = MoE(
-                self.config.hidden_size,
-                expert=self.transformer.h[layer_num].mlp,
+                hidden_size=self.config.hidden_size,
+                expert=original_mlp,
                 num_experts=num_experts,
                 ep_size=model_args.ep_size,
                 k=model_args.top_k_experts,
                 capacity_factor=model_args.capacity_factor,
                 eval_capacity_factor=model_args.eval_capacity_factor,
                 min_capacity=model_args.min_capacity,
-                use_residual=model_args.use_residual,
+                use_residual=getattr(model_args, 'use_residual', False),
             )
-            for e in self.transformer.h[layer_num].mlp.deepspeed_moe.experts.deepspeed_experts:  # check weight
+
+            layer_centroids = all_centroids[layer_num] if (all_centroids and layer_num in all_centroids) else None
+
+            # B. Handle Initialization Modes
+            if init_mode == 'random':
+                pass # DeepSpeed default is already random
+
+            elif init_mode == 'student_warm':
+                if layer_centroids is not None:
+                    print(f"Layer {layer_num} (Qwen): Warm-starting Student Router with Normalized Centroids.")
+                    with torch.no_grad():
+                        c_tensor = torch.from_numpy(layer_centroids).to(device=self.device, dtype=self.dtype)
+                        c_normed = torch.nn.functional.normalize(c_tensor, p=2, dim=-1)
+                        self.transformer.h[layer_num].mlp.deepspeed_moe.gate.wg.weight.data.copy_(c_normed * 10.0)
+
+            elif init_mode == 'teacher_kd':
+                # === NEW: TEACHER-STUDENT ROUTER ===
+                if layer_centroids is not None:
+                    c_tensor = torch.from_numpy(layer_centroids).float()
+                    layer_centroids = torch.nn.functional.normalize(c_tensor, p=2, dim=-1).numpy()
+
+                print(f"Layer {layer_num} (Qwen): Initializing Teacher-Student KD Router")
+                
+                kd_gate = NormalizedKDTopKGate(
+                    model_dim=self.config.hidden_size,
+                    num_experts=num_experts,
+                    k=model_args.top_k_experts,
+                    centroids=layer_centroids,
+                    # KD Hyperparameters passed from bash script
+                    temperature=getattr(model_args, 'router_temp_start', 1.0),
+                    kd_loss_weight=getattr(model_args, 'router_weight_start', 0.01),
+                    ema_decay=getattr(model_args, 'router_ema_start', 0.999),
+                    aux_loss_weight=user_aux_weight,
+                    normalize_input=getattr(model_args, 'normalize_router_input', True),
+                    normalize_weights='training',
+                    logit_scale=getattr(model_args, 'router_logit_scale', 10.0),
+                    # DeepSpeed capacity limits
+                    min_capacity=model_args.min_capacity,
+                    capacity_factor=model_args.capacity_factor,
+                    eval_capacity_factor=model_args.eval_capacity_factor
+                ).to(self.device).to(self.dtype) # <--- CRITICAL FOR QWEN
+                
+                self.transformer.h[layer_num].mlp.deepspeed_moe.gate = kd_gate
+
+            else:
+                # The fallback / no_teacher mode using SimplifiedNormalizedGate
+                print(f"Layer {layer_num} (Qwen): Initializing Simplified Normalized Router (No Teacher)")
+                kd_gate = SimplifiedNormalizedGate(
+                    model_dim=self.config.hidden_size,
+                    num_experts=num_experts,
+                    k=model_args.top_k_experts,
+                    fisher_directions=layer_centroids, 
+                    logit_scale=getattr(model_args, 'router_logit_scale', 10.0),
+                    aux_loss_weight=user_aux_weight,
+                    normalize_input=getattr(model_args, 'normalize_router_input', True),
+                    min_capacity=model_args.min_capacity,
+                    capacity_factor=model_args.capacity_factor,
+                    eval_capacity_factor=model_args.eval_capacity_factor
+                ).to(self.device).to(self.dtype) # <--- CRITICAL FOR QWEN
+                
+                self.transformer.h[layer_num].mlp.deepspeed_moe.gate = kd_gate
+
+            # Weight consistency check
+            for e in self.transformer.h[layer_num].mlp.deepspeed_moe.experts.deepspeed_experts:
                 loaded_state_dict = e.state_dict()
                 assert all([torch.allclose(pretrained_state_dict[k], v) for k, v in loaded_state_dict.items()])
                 assert all([torch.allclose(loaded_state_dict[k], v) for k, v in pretrained_state_dict.items()])
-        # ipdb.set_trace()
-        rank0_print(f"LLM num_layers: {num_layers}, MoE num_layers: {len(moe_layers_idx)}, where\n",
-                    *[f'layer-{layer_num} has {num_experts} experts\n' for num_experts, layer_num in
-                      zip(self.config.moe['num_experts'], moe_layers_idx)])
 
         for m in self.transformer.h:
             m.forward = MoEQWenBlock_forward(m)

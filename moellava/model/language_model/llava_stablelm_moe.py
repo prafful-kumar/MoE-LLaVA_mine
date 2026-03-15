@@ -1089,12 +1089,24 @@ def remove_teachers_before_save(model):
     print("\n" + "="*70)
     print("Removing Teacher Components")
     print("="*70 + "\n")
+
+    # 1. Dynamically target the correct layer list based on architecture
+    if hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
+        model_layers = model.transformer.h  # Qwen architecture
+    elif hasattr(model, 'model') and hasattr(model.model, 'layers'):
+        model_layers = model.model.layers   # StableLM / Phi / LLaMA architectures
+    else:
+        print("Warning: Could not locate transformer blocks to remove teachers. Skipping.")
+        return
     
     removed_count = 0
     
-    for layer_idx, layer in enumerate(model.model.layers):
-        if hasattr(layer.mlp, 'deepspeed_moe'):
+    for layer_idx, layer in enumerate(model_layers):
+        # SAFTEY FIX: Check if 'mlp' exists before checking if 'mlp' has 'deepspeed_moe'
+        if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'deepspeed_moe'):
             gate = layer.mlp.deepspeed_moe.gate
+            
+            # Check if this specific gate has a teacher to remove
             if hasattr(gate, 'disable_teacher'):
                 print(f"Layer {layer_idx}: Removing teacher...")
                 gate.disable_teacher()
@@ -1103,7 +1115,7 @@ def remove_teachers_before_save(model):
     print(f"\n✓ Removed {removed_count} teacher components")
     print("✓ Model now contains only student routers")
     print("="*70 + "\n")
-
+    
 class EvalMoELLaVAStablelmForCausalLM(MoELLaVAStablelmForCausalLM):
     config_class = MoELLaVAStablelmConfig
 

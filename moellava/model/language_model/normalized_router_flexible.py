@@ -333,84 +333,88 @@ class SimplifiedNormalizedGate(TopKGate):
     """
     Normalized routing with Fisher initialization.
     No teacher, no KD - just good init + normalization.
-    
-    Use this for ablation experiment E:
-    (Fisher Init + Input Norm + Weight Norm, No Teacher)
+    Works for both standard (fp32) and Qwen-style (bf16/fp16) models.
     """
-    def __init__(self, model_dim, num_experts, k=1, 
+    def __init__(self, model_dim, num_experts, k=1,
                  fisher_directions=None,
                  logit_scale=10.0,
                  aux_loss_weight=0.01,
                  normalize_input=True,
                  **kwargs):
         super().__init__(model_dim, num_experts, k, **kwargs)
-        
+
         self.logit_scale = logit_scale
         self.aux_loss_weight = aux_loss_weight
         self.normalize_input = normalize_input
-        
-        # FIX 1: Add logging placeholders (matches KDTopKGate interface)
+
         self.last_moe_loss = 0.0
-        self.last_kd_loss = 0.0  # Always 0 (no KD), but keeps interface consistent
-        
-        # FIX 2: Handle both numpy and tensor input
-        if fisher_directions is not None:
-            with torch.no_grad():
+        self.last_kd_loss = 0.0
+
+        with torch.no_grad():
+            if fisher_directions is not None:
+                # Handle numpy or tensor, always move to correct device
                 if not isinstance(fisher_directions, torch.Tensor):
-                    fisher_directions = torch.from_numpy(fisher_directions)
+                    fisher_directions = torch.tensor(
+                        fisher_directions, 
+                        device=self.wg.weight.device
+                    )
+                else:
+                    fisher_directions = fisher_directions.to(self.wg.weight.device)
+
+                # Normalize in fp32 for numerical stability, cast back to module dtype
                 fisher_norm = F.normalize(fisher_directions.float(), p=2, dim=-1)
-                self.wg.weight.data = fisher_norm * self.logit_scale
-        else:
-            with torch.no_grad():
-                self.wg.weight.data = F.normalize(
-                    self.wg.weight.data, p=2, dim=-1
-                ) * self.logit_scale
-        
+                self.wg.weight.data = (fisher_norm * self.logit_scale).to(
+                    self.wg.weight.dtype
+                )
+            else:
+                # Same: normalize in fp32, cast back
+                w_norm = F.normalize(self.wg.weight.float(), p=2, dim=-1)
+                self.wg.weight.data = (w_norm * self.logit_scale).to(
+                    self.wg.weight.dtype
+                )
+
     def forward(self, input, used_token=None, use_tutel=False):
-        # Ensure float32
-        if self.wg.weight.dtype != torch.float32:
-            self.wg = self.wg.float()
-            
+        # Preserve original dtype (critical for bf16/fp16 models like Qwen)
+        original_dtype = input.dtype
+
+        # fp32 for numerically stable normalization
         input_fp32 = input.float()
-        
-        # Normalize input
+
         if self.normalize_input:
             input_normed = F.normalize(input_fp32, p=2, dim=-1)
         else:
             input_normed = input_fp32
-        
-        # Normalize weights for routing
+
+        # Normalize weights in fp32, then cast back to module's dtype
         w_normed = F.normalize(self.wg.weight.float(), p=2, dim=-1)
-        
-        # Temporary weight swap
-        original_weight = self.wg.weight.data
-        self.wg.weight.data = w_normed * self.logit_scale
-        
+
+        original_weight_data = self.wg.weight.data
+        self.wg.weight.data = (w_normed * self.logit_scale).to(original_dtype)
+
         try:
-            gate_output = super().forward(input_normed, used_token, use_tutel)
+            # Cast input back to original dtype before DeepSpeed/parent processes it
+            gate_output = super().forward(
+                input_normed.to(original_dtype), used_token, use_tutel
+            )
         finally:
-            # FIX 3: Use try/finally so weights ALWAYS restore even if error occurs
-            self.wg.weight.data = original_weight
-        
-        # Extract aux loss
+            self.wg.weight.data = original_weight_data
+
         raw_aux_loss = gate_output[0]
         aux_loss = self.aux_loss_weight * raw_aux_loss
-        
-        # FIX 1: Store for logging
-        self.last_moe_loss = raw_aux_loss.item() if isinstance(raw_aux_loss, torch.Tensor) else 0.0
-        
+        self.last_moe_loss = (
+            raw_aux_loss.item() if isinstance(raw_aux_loss, torch.Tensor) else 0.0
+        )
+
         return (aux_loss,) + gate_output[1:]
-    
-    # FIX 2: Add get_loss_dict to match interface
+
     def get_loss_dict(self):
         return {
             'moe_loss': self.last_moe_loss,
-            'kd_loss': 0.0,  # No KD in this variant
+            'kd_loss': 0.0,
             'total_aux_loss': self.aux_loss_weight * self.last_moe_loss,
-            'temperature': None,   # No temperature (no KD)
-            'ema_decay': None      # No EMA (no teacher)
+            'temperature': None,
+            'ema_decay': None,
         }
-    
-    # FIX 3: Add stub so trainer callbacks don't crash
+
     def update_hyperparameters(self, temperature=None, kd_loss_weight=None, ema_decay=None):
-        pass  # No hyperparameters to update in this variant
+        pass
