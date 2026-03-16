@@ -85,9 +85,9 @@ def rank0_print(*args):
 
 @dataclass
 class RouterArguments:
-    router_temp_start: float = field(default=4.0, metadata={"help": "Starting temperature for router KD"})
+    router_temp_start: float = field(default=1.0, metadata={"help": "Starting temperature for router KD"})
     router_temp_end: float = field(default=1.0, metadata={"help": "Ending temperature for router KD"})
-    router_weight_start: float = field(default=0.5, metadata={"help": "Starting KD loss weight"})
+    router_weight_start: float = field(default=0.01, metadata={"help": "Starting KD loss weight"})
     router_weight_end: float = field(default=0.05, metadata={"help": "Ending KD loss weight"})
     router_ema_start: float = field(default=0.999, metadata={"help": "Starting EMA decay (Stable)"})
     router_ema_end: float = field(default=0.95, metadata={"help": "Ending EMA decay (Adaptive)"})

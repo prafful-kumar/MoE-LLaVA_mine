@@ -881,8 +881,8 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
 
         # Retrieve Initial Hyperparameters (Safe Defaults using getattr)
         # Note: We look for 'router_weight_start' which matches our bash script/RouterArguments
-        initial_kd_weight = getattr(model_args, 'router_weight_start', 0.1)
-        initial_temp = getattr(model_args, 'router_temp_start', 2.0)
+        initial_kd_weight = getattr(model_args, 'router_weight_start', 0.01)
+        initial_temp = getattr(model_args, 'router_temp_start', 1.0)
         initial_ema = getattr(model_args, 'router_ema_start', 0.999)
         
         # If we are doing any custom weighting, we override the model's global coef

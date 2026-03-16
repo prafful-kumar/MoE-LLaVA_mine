@@ -34,7 +34,7 @@ HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:1,2,4
     --gradient_accumulation_steps 12 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 24000 \
+    --save_steps 4000 \
     --save_total_limit 20 \
     --learning_rate 2e-5 \
     --weight_decay 0. \

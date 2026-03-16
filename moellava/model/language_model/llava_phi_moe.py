@@ -495,8 +495,8 @@ class MoELLaVAPhiForCausalLM(PhiForCausalLM, LlavaMetaForCausalLM):
         user_aux_weight = getattr(model_args, 'router_aux_loss_coef', 0.01)
         init_mode = getattr(model_args, 'router_init_mode', 'teacher_kd')
 
-        initial_kd_weight = getattr(model_args, 'router_weight_start', 0.1)
-        initial_temp = getattr(model_args, 'router_temp_start', 2.0)
+        initial_kd_weight = getattr(model_args, 'router_weight_start', 0.01)
+        initial_temp = getattr(model_args, 'router_temp_start', 1.0)
         initial_ema = getattr(model_args, 'router_ema_start', 0.999)
 
         print("\n" + "="*50)
