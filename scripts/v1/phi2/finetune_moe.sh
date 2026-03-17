@@ -8,9 +8,9 @@ router_aux_loss_coef=0.0
 JSON_FOLDER="train_json"
 IMAGE_FOLDER="IMAGE_FOLDER"
 router_centroids_path="get_kmeans_centroids/fisher_directions_phi/5000.pkl"
-ROUTER_INIT_MODE="no_teacher"
+ROUTER_INIT_MODE="teacher_kd"
 
-HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:1,2,4,6 --master_port $((6 + 29503)) moellava/train/train_mem.py \
+HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:0,1,2,3 --master_port $((7 + 29503)) moellava/train/train_mem.py \
     --moe_enable True --num_experts ${num_experts} --top_k_experts ${top_k_experts} --capacity_factor 1.5 \
     --moe_mode ${moe_mode} --use_residual ${use_residual} --router_aux_loss_coef ${router_aux_loss_coef} \
     --train_modules fc1 fc2 wg \
@@ -27,7 +27,7 @@ HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:1,2,4
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
-    --output_dir ./checkpoints_phi_student/llavaphi-2.7b-finetune-moe \
+    --output_dir ./checkpoints_phi_TS/llavaphi-2.7b-finetune-moe \
     --num_train_epochs 1 \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 4 \

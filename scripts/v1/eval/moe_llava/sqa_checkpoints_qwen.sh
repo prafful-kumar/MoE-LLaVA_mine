@@ -5,7 +5,9 @@ cd /scratch/prafull/MoE-LLaVA_mine
 EVAL="moellava/eval"
 GPU=${1:-7}
 RESULTS_DIR="eval_results/sqa_checkpoints"
+LOG_DIR="logs/eval/sqa_checkpoints"
 STEPS=(1 100 200 300 400 500 600 700 800 900 1000)
+mkdir -p "${LOG_DIR}"
 
 declare -A VARIANTS
 VARIANTS=(
@@ -16,6 +18,9 @@ VARIANTS=(
 
 for VARIANT in "${!VARIANTS[@]}"; do
     IFS='|' read -r BASE_CKPT CONV <<< "${VARIANTS[$VARIANT]}"
+    LOG_FILE="${LOG_DIR}/qwen_${VARIANT}.log"
+    exec > >(tee -a "${LOG_FILE}") 2>&1
+    echo "=== SQA qwen_${VARIANT} | GPU ${GPU} | $(date) ==="
 
     for STEP in "${STEPS[@]}"; do
         CKPT="${BASE_CKPT}/checkpoint-${STEP}"

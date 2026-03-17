@@ -1,35 +1,31 @@
-import json
 import os
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-RESULTS_DIR = "/scratch/prafull/MoE-LLaVA_mine/eval_results/sqa_checkpoints"
-OUT_DIR = "/scratch/prafull/MoE-LLaVA_mine/plots/sqa_qwen"
+EXCEL_FILE = "excel_results/checkpoint_sqa_qwen.xlsx"
+OUT_DIR = "plots/sqa_qwen"
 
 variants = {
-    "author": {"label": "Random (Author)", "color": "#1f77b4"},
-    "student": {"label": "Student-Only (No Teacher)", "color": "#ff7f0e"},
-    "teacher_student": {"label": "Teacher-Student (KD)", "color": "#2ca02c"},
+    "author":          {"label": "Random (Author)",          "color": "#1f77b4"},
+    "student":         {"label": "Student-Only (No Teacher)", "color": "#ff7f0e"},
+    "teacher_student": {"label": "Teacher-Student (KD)",      "color": "#2ca02c"},
 }
 
 STEPS = [1, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
 
+# Load from Excel
+df_all = pd.read_excel(EXCEL_FILE, sheet_name="All")
 
-def load_results(backbone, variant):
-    steps, accs, img_accs = [], [], []
-    for step in STEPS:
-        path = os.path.join(RESULTS_DIR, f"{backbone}_{variant}_step{step}.json")
-        if os.path.exists(path):
-            with open(path) as f:
-                data = json.load(f)
-            steps.append(step)
-            accs.append(data["accuracy"])
-            img_accs.append(data["img_accuracy"])
-    return steps, accs, img_accs
+def load_results(variant):
+    df = df_all[df_all["variant"] == variant].sort_values("step")
+    return df["step"].tolist(), df["accuracy"].tolist(), df["img_accuracy"].tolist()
 
 
 # ---- Individual per variant ----
 for vname, cfg in variants.items():
-    steps, accs, img_accs = load_results("qwen", vname)
+    steps, accs, img_accs = load_results(vname)
     if not steps:
         print(f"No results for qwen_{vname}, skipping")
         continue
@@ -51,7 +47,7 @@ for vname, cfg in variants.items():
 # ---- Comparison: overall accuracy ----
 fig, ax = plt.subplots(figsize=(10, 6))
 for vname, cfg in variants.items():
-    steps, accs, _ = load_results("qwen", vname)
+    steps, accs, _ = load_results(vname)
     if not steps:
         continue
     ax.plot(steps, accs, color=cfg["color"], linewidth=2.0, marker="o", markersize=6, label=cfg["label"])
@@ -69,7 +65,7 @@ print("Saved all_sqa.png")
 # ---- Comparison: image accuracy ----
 fig, ax = plt.subplots(figsize=(10, 6))
 for vname, cfg in variants.items():
-    steps, _, img_accs = load_results("qwen", vname)
+    steps, _, img_accs = load_results(vname)
     if not steps:
         continue
     ax.plot(steps, img_accs, color=cfg["color"], linewidth=2.0, marker="s", markersize=6, label=cfg["label"])

@@ -33,18 +33,24 @@ def get_gating_logit_by_hook(model):
         if 'wg' in n and isinstance(m, nn.Linear):
             # Parse the layer index from the name (e.g. "model.layers.12.mlp...")
             # Regex finds the number immediately following 'layers.'
-            match = re.search(r'layers\.(\d+)', n)
+            match = re.search(r'layers\.(\d+)', n) or re.search(r'\.h\.(\d+)\.', n)
             if match:
                 layer_idx = int(match.group(1))
                 print(f"   ✅ Hooked Layer {layer_idx} ({n})")
-                
+
                 cur_hook = HookTool()
                 m.register_forward_hook(cur_hook.hook_fun)
-                
+
                 fea_hooks.append(cur_hook)
                 layer_indices.append(layer_idx)
             else:
-                print(f"   ⚠️ Warning: Could not parse layer index from {n}")
+                # Fallback: still register hook using list position
+                layer_idx = len(fea_hooks)
+                print(f"   ✅ Hooked Layer {layer_idx} (fallback position, {n})")
+                cur_hook = HookTool()
+                m.register_forward_hook(cur_hook.hook_fun)
+                fea_hooks.append(cur_hook)
+                layer_indices.append(layer_idx)
 
     return fea_hooks, layer_indices # <--- Return both
 
