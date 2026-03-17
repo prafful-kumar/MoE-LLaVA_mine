@@ -15,7 +15,7 @@ router_centroids_path="get_kmeans_centroids/fisher_directions_qwen/5000.pkl"
 ROUTER_INIT_MODE="no_teacher"
 ENTROPY_LOSS_WEIGHT=0.01
 
-HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:4,5,6 --master_port $((11 + 29503)) moellava/train/train_mem.py 2>&1 | tee logs/train/qwen_entropy.log \
+HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:4,5,6 --master_port $((11 + 29503)) moellava/train/train_mem.py \
     --moe_enable True --num_experts ${num_experts} --top_k_experts ${top_k_experts} --capacity_factor 1.5 \
     --moe_mode ${moe_mode} --use_residual ${use_residual} --router_aux_loss_coef ${router_aux_loss_coef} \
     --train_modules mlp.w1 mlp.w2 mlp.c_proj wg \
@@ -55,4 +55,4 @@ HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:4,5,6
     --cache_dir "./cache_dir" \
     --router_centroids_path ${router_centroids_path} \
     --router_init_mode ${ROUTER_INIT_MODE} \
-    --entropy_loss_weight ${ENTROPY_LOSS_WEIGHT}
+    --entropy_loss_weight ${ENTROPY_LOSS_WEIGHT} 2>&1 | tee logs/train/qwen_entropy.log
