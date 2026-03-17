@@ -142,11 +142,13 @@ class ModelArguments:
     router_aux_loss_coef: float = 0.01
 
     router_centroids_path: Optional[str] = field(default=None, metadata={"help": "Path to the pickle file containing K-Means centroids"})
-    
+
     router_init_mode: str = field(default=None, metadata={"help": "Initialization mode: 'random', 'student_warm', or 'teacher_kd'"})
-    
+
+    entropy_loss_weight: float = field(default=0.0, metadata={"help": "Weight for router entropy regularization loss (no_teacher mode only)"})
+
     # kd_loss_weight: float = field(default=0.01, metadata={"help": "Weight for the Knowledge Distillation loss (Teacher-Student)"})
-    
+
     # ema_decay: float = field(default=0.999, metadata={"help": "Exponential Moving Average decay for the Teacher weights"})
     
     # =============================================================

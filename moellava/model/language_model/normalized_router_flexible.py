@@ -339,16 +339,19 @@ class SimplifiedNormalizedGate(TopKGate):
                  fisher_directions=None,
                  logit_scale=10.0,
                  aux_loss_weight=0.01,
+                 entropy_loss_weight=0.0,
                  normalize_input=True,
                  **kwargs):
         super().__init__(model_dim, num_experts, k, **kwargs)
 
         self.logit_scale = logit_scale
         self.aux_loss_weight = aux_loss_weight
+        self.entropy_loss_weight = entropy_loss_weight
         self.normalize_input = normalize_input
 
         self.last_moe_loss = 0.0
         self.last_kd_loss = 0.0
+        self.last_entropy_loss = 0.0
 
         with torch.no_grad():
             if fisher_directions is not None:
@@ -405,13 +408,27 @@ class SimplifiedNormalizedGate(TopKGate):
             raw_aux_loss.item() if isinstance(raw_aux_loss, torch.Tensor) else 0.0
         )
 
-        return (aux_loss,) + gate_output[1:]
+        # Entropy regularization — gradients MUST flow through wg.weight
+        if self.entropy_loss_weight > 0.0:
+            w_normed_fp32 = F.normalize(self.wg.weight.float(), p=2, dim=-1)
+            logits = F.linear(input_normed, w_normed_fp32) * self.logit_scale
+            probs = F.softmax(logits.float(), dim=-1)
+            H = -(probs * torch.log(probs + 1e-8)).sum(-1).mean()
+            entropy_loss = self.entropy_loss_weight * H
+            self.last_entropy_loss = H.item()
+            total_loss = aux_loss + entropy_loss
+        else:
+            self.last_entropy_loss = 0.0
+            total_loss = aux_loss
+
+        return (total_loss,) + gate_output[1:]
 
     def get_loss_dict(self):
         return {
             'moe_loss': self.last_moe_loss,
             'kd_loss': 0.0,
-            'total_aux_loss': self.aux_loss_weight * self.last_moe_loss,
+            'entropy_loss': self.last_entropy_loss,
+            'total_aux_loss': (self.aux_loss_weight * self.last_moe_loss) + (self.entropy_loss_weight * self.last_entropy_loss),
             'temperature': None,
             'ema_decay': None,
         }
