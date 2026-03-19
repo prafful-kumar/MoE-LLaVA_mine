@@ -939,6 +939,23 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
                         self.model.layers[layer_num].mlp.deepspeed_moe.gate.wg.weight.data.copy_(c_normed * 10.0)
                         # --- NORMALIZATION FIX END ---
             
+            elif init_mode == 'no_teacher':
+                print(f"Layer {layer_num} (StableLM): Initializing Simplified Normalized Router (No Teacher)")
+                kd_gate = SimplifiedNormalizedGate(
+                    model_dim=self.config.hidden_size,
+                    num_experts=num_experts,
+                    k=model_args.top_k_experts,
+                    fisher_directions=layer_centroids,
+                    logit_scale=getattr(model_args, 'router_logit_scale', 10.0),
+                    aux_loss_weight=user_aux_weight,
+                    entropy_loss_weight=getattr(model_args, 'entropy_loss_weight', 0.0),
+                    normalize_input=getattr(model_args, 'normalize_router_input', True),
+                    min_capacity=model_args.min_capacity,
+                    capacity_factor=model_args.capacity_factor,
+                    eval_capacity_factor=model_args.eval_capacity_factor
+                ).to(self.device)
+                self.model.layers[layer_num].mlp.deepspeed_moe.gate = kd_gate
+
             else:
 
                 if layer_centroids is not None:
