@@ -13,9 +13,8 @@ JSON_FOLDER="train_json"
 IMAGE_FOLDER="IMAGE_FOLDER"
 router_centroids_path="get_kmeans_centroids/fisher_directions/5000.pkl"
 ROUTER_INIT_MODE="no_teacher"
-ENTROPY_LOSS_WEIGHT=0.01
 
-HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:2,3,4 --master_port $((13 + 29503)) moellava/train/train_mem.py \
+HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:0,1,2 --master_port $((14 + 29503)) moellava/train/train_mem.py \
     --moe_enable True --num_experts ${num_experts} --top_k_experts ${top_k_experts} --capacity_factor 1.5 \
     --moe_mode ${moe_mode} --use_residual ${use_residual} --router_aux_loss_coef ${router_aux_loss_coef} \
     --train_modules gate_proj up_proj down_proj wg \
@@ -32,7 +31,7 @@ HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:2,3,4
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
-    --output_dir ./checkpoints_stablelm_entropy/llava-stablelm-1.6b-finetune-moe \
+    --output_dir ./checkpoints_stablelm_student/llava-stablelm-1.6b-finetune-moe \
     --num_train_epochs 1 \
     --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 4 \
@@ -54,5 +53,4 @@ HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:2,3,4
     --report_to tensorboard \
     --cache_dir "./cache_dir" \
     --router_centroids_path ${router_centroids_path} \
-    --router_init_mode ${ROUTER_INIT_MODE} \
-    --entropy_loss_weight ${ENTROPY_LOSS_WEIGHT} 2>&1 | tee logs/train/stablelm_entropy.log
+    --router_init_mode ${ROUTER_INIT_MODE} 2>&1 | tee logs/train/stablelm_student.log

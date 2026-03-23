@@ -264,7 +264,7 @@ class NormalizedKDTopKGate(TopKGate):
             self.has_teacher = False
             torch.cuda.empty_cache()
             
-    def update_hyperparameters(self, temperature=None, kd_loss_weight=None, ema_decay=None):
+    def update_hyperparameters(self, temperature=None, kd_loss_weight=None, ema_decay=None, entropy_loss_weight=None):
         if temperature is not None: self.temperature = temperature
         if kd_loss_weight is not None: self.kd_loss_weight = kd_loss_weight
         if ema_decay is not None: self.ema_decay = ema_decay
@@ -433,5 +433,6 @@ class SimplifiedNormalizedGate(TopKGate):
             'ema_decay': None,
         }
 
-    def update_hyperparameters(self, temperature=None, kd_loss_weight=None, ema_decay=None):
-        pass
+    def update_hyperparameters(self, temperature=None, kd_loss_weight=None, ema_decay=None, entropy_loss_weight=None):
+        if entropy_loss_weight is not None:
+            self.entropy_loss_weight = entropy_loss_weight

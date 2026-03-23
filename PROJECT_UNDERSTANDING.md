@@ -81,13 +81,14 @@ Idea: Before Stage III, run K-means clustering on the hidden-state activations f
 
 Additionally, a **Knowledge Distillation (KD) teacher** can be used to keep the student router aligned with the centroid-derived prior while it adapts.
 
-### Three Router Initialization Schemes
+### Four Router Initialization / Regularization Schemes
 
-| Scheme | Code Name | `router_init_mode` | Description |
-|---|---|---|---|
-| Random (author) | `author` | `random` | Original paper: random `wg` init, no KD |
-| Student-only | `student` | `no_teacher` | K-means init for `wg`, no KD during training |
-| Teacher-Student | `TS` | `teacher_kd` | K-means init + KD loss from centroid teacher during Stage III |
+| Scheme | Code Name | `router_init_mode` | `entropy_loss_weight` | Description |
+|---|---|---|---|---|
+| Random (author) | `author` | `random` | 0 | Original paper: random `wg` init, no KD |
+| Student-only | `student` | `no_teacher` | 0 | K-means init for `wg`, no KD during training |
+| Teacher-Student (TS) | `TS` | `teacher_kd` | 0 | K-means init + KD loss from centroid teacher during Stage III |
+| Entropy | `entropy` | `no_teacher` | 0.01–0.1 | K-means init + entropy minimization to force peaky routing |
 
 ### The KD Gate: `normalized_router_flexible.py`
 
@@ -122,9 +123,42 @@ teacher_weight ← L2_normalize(teacher_weight)   # keep on unit sphere
 ```
 The teacher slowly tracks the student. Early in training (high `ema_decay`), the teacher is stable (close to K-means centroids). Later, it adapts. This prevents the teacher from becoming stale as the student specializes.
 
-### Dynamic Hyperparameter Schedule (`router_callback.py`)
+### Entropy Regularization (`SimplifiedNormalizedGate`)
 
-The `RouterDistillationCallback` updates gate hyperparameters every step:
+Added to the `no_teacher` gate to force router specialization without a teacher:
+
+```
+logits = logit_scale * dot(normalize(input), normalize(wg.weight))
+probs  = softmax(logits)
+H      = -(probs * log(probs + 1e-8)).sum(-1).mean()    # per-token entropy, averaged
+loss   = aux_loss + entropy_loss_weight * H
+```
+
+Adding `+H` to the loss causes gradient descent to minimize entropy → pushes router toward peaky (confident) distributions like [0.99, 0.01, 0.0, 0.0]. This is the opposite of the standard "maximize entropy for diversity" trick — here we want each token to strongly prefer one expert.
+
+**Key implementation details:**
+- Logits computed **outside** `torch.no_grad()` so gradients flow: `H → probs → logits → wg.weight`
+- `last_entropy_loss` stores raw H (unweighted) for logging, consistent with `last_moe_loss` pattern
+- Only present in `SimplifiedNormalizedGate`, NOT in `NormalizedKDTopKGate` (TS)
+
+### Entropy Warmup (`EntropyWarmupCallback`)
+
+Linear warmup of `entropy_loss_weight` from 0 to the configured target over the first 10% of training steps, then constant. This prevents the entropy penalty from disrupting routing before the LM loss has established basic token-expert assignments.
+
+```
+if step < 0.1 * total_steps:
+    entropy_weight = target_weight * (step / (0.1 * total_steps))
+else:
+    entropy_weight = target_weight
+```
+
+**Status:** Code ready in `router_callback.py`, automatically activated when `router_init_mode=no_teacher` and `entropy_loss_weight > 0`. Not yet used in a completed training run (the currently-running `qwen_entropy_w01` uses the pre-warmup code).
+
+### Dynamic Hyperparameter Schedule (`RouterDistillationCallback`)
+
+**⚠️ IMPORTANT: This callback is currently COMMENTED OUT in `train.py` (lines 1604–1612). All current TS experiments use FIXED hyperparameters — no dynamic scheduling.**
+
+The callback was designed to update gate hyperparameters every step:
 
 | Parameter | Start | End | Schedule |
 |---|---|---|---|
@@ -132,9 +166,18 @@ The `RouterDistillationCallback` updates gate hyperparameters every step:
 | KD loss weight | 0.5 | 0.05 | Cosine decay |
 | EMA decay | 0.999 | 0.95 | Linear decay |
 
-High temperature early → soft targets → transfer routing distribution knowledge.
-Low temperature late → hard targets → sharpen to the student's own decisions.
-Decreasing EMA → teacher becomes more adaptive later in training.
+But since it's disabled, current TS models train with:
+- Temperature: **1.0 fixed** (from `router_temp_start`)
+- KD weight: **0.01 fixed** (from `initial_kd_weight`)
+- EMA decay: **0.999 fixed** (from `router_ema_start`)
+
+**Implications:**
+1. KD signal is very weak: 0.01 × KL_div ≈ 0.001–0.01 vs LM loss of ~2.5 → KD is <1% of total loss
+2. Teacher drifts completely: at ema=0.999, K-means anchor is ~95% gone by step 3000 (0.999^3000 ≈ 0.05)
+3. No temperature annealing: T=1.0 means no distribution softening (hard targets from the start)
+
+**Recommended changes (not yet implemented):**
+- Re-enable callback with: `temp_start=2.0, temp_end=1.0, weight_start=0.05, weight_end=0.01, ema_start=0.999, ema_end=0.999` (freeze teacher to preserve K-means anchor)
 
 **Fixed hyperparameters (CLAUDE.md constraint):**
 - `initial_kd_weight = 0.01`
@@ -145,21 +188,33 @@ Decreasing EMA → teacher becomes more adaptive later in training.
 
 ## 3. Training Details
 
-### Qwen-1.8B experiments
+### Qwen-1.8B experiments (9240 steps each, 3 GPUs, batch=2, grad_accum=12)
 
-| Variant | Checkpoint path | Steps | Status |
+| Variant | Checkpoint path (HPC) | entropy_weight | Status |
 |---|---|---|---|
-| author (random) | `checkpoints_qwen/llavaqwen-1.8b-finetune-moe/` | 9240 | Complete |
-| student (no KD) | `checkpoints_qwen_student/llavaqwen-1.8b-finetune-moe/` | 9240 | Complete |
-| teacher-student | `checkpoints_qwen_TS/llavaqwen-1.8b-finetune-moe/` | 9240 | Complete |
+| author (random) | `checkpoints_qwen_author/llavaqwen-1.8b-finetune-moe/` | — | Complete |
+| student (no KD) | `checkpoints_qwen_student/llavaqwen-1.8b-finetune-moe/` | — | Complete |
+| teacher-student | `checkpoints_qwen_TS/llavaqwen-1.8b-finetune-moe/` | — | Complete |
+| entropy (w=0.01) | `checkpoints_qwen_entropy/llavaqwen-1.8b-finetune-moe/` | 0.01 | Complete |
+| entropy (w=0.1) | `checkpoints_qwen_entropy_w01/llavaqwen-1.8b-finetune-moe/` | 0.1 | Training (~76%) |
 
-### Phi2-2.7B experiments
+### Phi2-2.7B experiments (13860 steps each, 4 GPUs, batch=1, grad_accum=12)
 
-| Variant | Checkpoint path | Steps | Status |
+| Variant | Checkpoint path (HPC) | entropy_weight | Status |
 |---|---|---|---|
-| author (random) | `/scratch/prafull/hpc/checkpoints_phi/llavaphi-2.7b-finetune-moe/` | 13860 | Complete |
-| student (no KD) | `checkpoints_phi_student/llavaphi-2.7b-finetune-moe/` | 13860 | Complete |
-| teacher-student | Not trained (only 2 Phi2 variants) | — | N/A |
+| author (random) | `checkpoints_phi/llavaphi-2.7b-finetune-moe/` | — | Complete |
+| student (no KD) | `checkpoints_phi_student/llavaphi-2.7b-finetune-moe/` | — | Complete |
+| teacher-student | `checkpoints_phi_TS/llavaphi-2.7b-finetune-moe/` | — | Complete |
+| entropy (w=0.01) | `checkpoints_phi_entropy/llavaphi-2.7b-finetune-moe/` | 0.01 | Complete |
+
+### StableLM-1.6B experiments (3 GPUs, batch=2, grad_accum=12)
+
+| Variant | Checkpoint path (HPC) | entropy_weight | Status |
+|---|---|---|---|
+| author (random) | — | — | Not trained |
+| student (no KD) | `checkpoints_stablelm_student/llava-stablelm-1.6b-finetune-moe/` | — | Complete |
+| teacher-student | `checkpoints_stablelm_TS/llava-stablelm-1.6b-finetune-moe/` | — | Complete |
+| entropy (w=0.01) | `checkpoints_stablelm_entropy/llava-stablelm-1.6b-finetune-moe/` | 0.01 | Complete |
 
 ---
 
@@ -167,42 +222,125 @@ Decreasing EMA → teacher becomes more adaptive later in training.
 
 All local benchmarks evaluated on a single GPU (shared server constraint).
 
-### Qwen-1.8B Results vs Paper
+### MME Scoring Methodology
 
-| Benchmark | Paper (Qwen) | Author (random) | Student (no KD) | Teacher-Student |
+**IMPORTANT**: MME evaluations report **two component scores** that must be **summed together** to get the total MME score:
+
+- **MME-P (Perception)**: Evaluation of object recognition, color identification, positional understanding, etc.
+- **MME-C (Cognition)**: Evaluation of reasoning, counting, scene understanding, etc.
+- **MME Total** = MME-P + MME-C
+
+Example:
+```
+Qwen entropy (w=0.01): MME-P=1301.3 + MME-C=233.2 = MME Total=1534.5
+```
+
+**Do not report only the perception score or only the cognition score as "MME".** Always report the sum.
+
+### POPE Evaluation Bug (CRITICAL FIX)
+
+**⚠️ BUG IDENTIFIED AND FIXED (March 23, 2026):**
+
+The original `eval_pope.py` script had a critical bug that caused completely wrong accuracy calculations for Popular and Random splits.
+
+**The Problem:**
+- The script matched model answers to annotation labels **by position** (line 1, line 2, ...) instead of by `question_id`
+- Question IDs were completely mismatched across files:
+  - Adversarial: IDs 1-3000 in both files (worked by coincidence)
+  - Popular: IDs 1-3000 in annotations, but 20000001-20003000 in questions (WRONG)
+  - Random: IDs 1-3000 in annotations, but 10000001-10002910 in questions (WRONG)
+
+**Example of the bug:**
+```
+Annotation file line 1:  question_id=1, label="yes"
+Question file adversarial:  question_id=1 → Matches ✓
+Question file popular:  question_id=20000001 → WRONG match!
+Question file random:  question_id=10000001 → WRONG match!
+```
+
+**The Fix:**
+Modified `eval_pope()` function to:
+1. Accept a `label_dict` (dict keyed by question_id) instead of reading lines in order
+2. Match answers to labels using `question_id` lookup
+3. Skip answers with missing question_ids and report warnings
+
+**Before Fix (WRONG):**
+- Adversarial: 85.9% (accidentally correct, but for wrong reasons)
+- Popular: 87.9% (COMPLETELY WRONG due to ID mismatch)
+- Random: 50.5% (COMPLETELY WRONG due to ID mismatch)
+
+**After Fix (CORRECT):**
+- Popular: 73.23% ← Model avoids hallucinating common objects
+- Adversarial: 58.47% ← Moderate hallucination on co-occurring objects
+- Random: 52.16% ← Baseline, barely above random guessing
+
+**Comparison with POPE Paper LLaVA Baseline:**
+Paper shows LLaVA struggling with hallucinations:
+- Random: 54.43%, Popular: 52.43%, Adversarial: 50.77%
+
+Our model performs much better (higher accuracy = less hallucination), suggesting better training or initialization.
+
+**Root Causes Fixed:**
+1. **Question ID mismatch**: Annotation files used IDs 1-3000, but question files used IDs 1-3000 (adversarial), 20000001+ (popular), 10000001+ (random)
+   - Solution: Match by question **text** instead of ID
+2. **Text typos**: 246 questions had "imange" instead of "image"
+   - Solution: Normalize text before matching
+3. **Position-based matching bug**: Original code matched by line order instead of content
+   - Solution: Build dict keyed by normalized question text
+
+**Files Modified:**
+- `moellava/eval/eval_pope.py` — Fixed to match by normalized question text
+
+### Qwen-1.8B Results
+
+| Benchmark | Paper | Author | Student | TS | Entropy (w=0.01) |
+|---|---|---|---|---|---|
+| GQA | 61.5 | 62.02 | 61.95 | **62.15** | 61.73 |
+| ScienceQA | 63.1 | **63.52** | 61.80 | 62.72 | 61.80 |
+| TextVQA | 48.0 | 48.51 | 48.08 | **48.89** | 48.07 |
+| POPE Pop Acc | 88.6 | **88.6%** | — | — | 87.9% |
+| POPE Adv Acc | 86.1 | 86.1% | — | — | 85.9% |
+| MME-P | — | — | — | — | 1301.3 |
+| MME-C | — | — | — | — | 233.2 |
+| MME Total | 1291.6 | **1572.8** | 1553.8 | 1561.5 | 1534.5 |
+
+### Phi2-2.7B Results
+
+| Benchmark | Paper | Author | Student | TS | Entropy (w=0.01) |
+|---|---|---|---|---|---|
+| GQA | 61.4 | 59.44 | **60.95** | — | 60.49 |
+| ScienceQA | 68.5 | **71.75** | 70.76 | — | 70.08 |
+| TextVQA | 51.4 | **52.11** | 51.69 | — | 51.50 |
+| POPE Pop Acc | 87.5 | **87.5%** | — | — | 87.0% |
+| POPE Adv Acc | 85.9 | **85.9%** | — | — | 85.7% |
+| MME-P | — | — | — | — | 1337.1 |
+| MME-C | — | — | — | — | 272.5 |
+| MME Total | 1423.0 | **1685.7** | 1670.3 | — | 1609.6 |
+
+### StableLM-1.6B Results
+
+| Benchmark | Paper | Student | TS | Entropy (w=0.01) |
 |---|---|---|---|---|
-| GQA | 61.5 | 62.02 | 61.95 | **62.15** |
-| ScienceQA | 63.1 | 63.52 | 61.80 | 62.72 |
-| TextVQA | 48.0 | 48.51 | 48.08 | **48.89** |
-| POPE Adv F1 | 85.4 | 84.5 | 84.7 | 84.6 |
-| MME Total | 1291.6 | 1572.82 | 1553.76 | 1561.46 |
+| GQA | 60.3 | **62.12** | 61.55 | 62.01 |
+| ScienceQA | 62.6 | 60.55 | 60.58 | 59.75 |
+| TextVQA | 50.1 | 49.94 | 50.06 | **50.18** |
+| POPE Pop Acc | 85.3 | 74.3% | 74.5% | 74.4% |
+| MME-P | — | 1362.2 | 1358.4 | **1369.4** |
+| MME-C | — | 244.6 | 230.0 | **256.4** |
+| MME Total | 1318.2 | 1606.9 | 1588.4 | **1625.8** |
 
-*Notes:*
-- Our `author` variant **exceeds** the paper on GQA, TextVQA, MME — likely due to different training data mix or hyperparameters in our re-run.
-- MME total is consistently much higher (~1550+) than paper's 1291.6. This warrants investigation (possible eval script difference or data split).
-- POPE random category gives ~50% accuracy across all variants — essentially random. This is a known issue, likely the model over-predicts "yes" or the category is harder.
+*(Note: StableLM has no author/random baseline trained yet.)*
 
-### Phi2-2.7B Results vs Paper
-
-| Benchmark | Paper (Phi2) | Author (random) | Student (no KD) |
-|---|---|---|---|
-| GQA | 61.4 | 59.44 | **60.95** |
-| ScienceQA | 68.5 | **71.75** | 70.76 |
-| TextVQA | 51.4 | **52.11** | 51.69 |
-| POPE Adv F1 | 84.9 | 85.28 | 84.84 |
-| MME Total | 1423.0 | **1685.72** | 1670.29 |
-
-*Notes:*
-- Student variant slightly underperforms author on most benchmarks for Phi2.
-- Both variants exceed the paper on ScienceQA and MME substantially.
-- Author variant has higher SQA (71.75 vs 68.5 paper) — potentially different Stage II checkpoint.
-
-### Key Observations Across Both Backbones
+### Key Observations
 
 1. **KD initialization does not consistently outperform random init** at the final checkpoint. Gains are marginal (within ~0.5-1%).
 2. **Teacher-student (Qwen) is competitive**, occasionally best on GQA and TextVQA.
 3. **All our variants exceed the paper's numbers** on several benchmarks — the Stage II starting checkpoint may be stronger than the paper's.
 4. **POPE random ~50%** across all variants and backbones: this is anomalous. The popular and adversarial splits look normal (~85-87%). Possible scoring script issue or the "random" split has distribution properties that expose a model bias.
+5. **Entropy (w=0.01) does NOT outperform student baseline** on Qwen or Phi2. Results are near-identical or slightly worse. On StableLM, entropy shows a slight edge in MME (+19 over student) and TextVQA (+0.24%), but loses on ScienceQA (-0.8%) and GQA (-0.11%).
+6. **MME is consistently much higher than paper** across all backbones (~200-300 points above). This needs investigation.
+7. **StableLM POPE scores (~74%) are much lower than paper's (85%)** — likely a different POPE eval methodology or the checkpoint itself is weaker on this benchmark.
+8. **TS has no clear advantage over student** across any backbone — the KD signal at weight=0.01, T=1.0 with no dynamic scheduling may be too weak to matter.
 
 ---
 
@@ -279,15 +417,29 @@ Loss curves extracted from `trainer_state.json` in each checkpoint folder. Plots
 
 ## 8. Open Questions for the Report
 
-1. **Why is MME so much higher than paper?** Our Qwen-author MME is 1572 vs paper's 1291. Is this a different Stage II checkpoint, a different eval split, or a scoring script difference?
+### Existing Questions
 
-2. **POPE random ~50% — is this a bug?** Popular and adversarial are normal. Only random is broken. Could be that the "random" split has a different yes/no balance, or the model consistently predicts "yes" for that split.
+1. **Why is MME so much higher than paper?** Our Qwen-author MME is 1572 vs paper's 1291. StableLM is 1606+ vs paper's 1318. Phi2 is 1609+ vs paper's 1423. This 200-300 point gap is consistent across all backbones. Hypotheses: (a) different Stage II checkpoint, (b) different eval split, (c) scoring script difference, (d) different image preprocessing.
 
-3. **Does KD init help early convergence?** This is the core question the SQA checkpoint analysis will answer. If teacher-student (TS) reaches 60% SQA faster than random (author), that supports the hypothesis.
+2. **POPE random ~50% — is this a bug?** Popular and adversarial splits are normal (~85-87%). Only the "random" split gives ~50% accuracy. Consistent across all variants and backbones — suggests a systematic issue with eval methodology rather than model quality. Need to check: is our POPE random split the correct file? Are the answer labels correct?
 
-4. **Does the diagnostic analysis reveal expert specialization by router scheme?** Comparing `dual/kmeans_5000/` (one scheme) with other scheme's `.pt` files could show whether KD-initialized routing leads to more modality-specialized or semantically-specialized experts.
+3. **Does KD init help early convergence?** This is the core question the SQA checkpoint analysis should answer. If teacher-student (TS) reaches 60% SQA faster than random (author), that supports the hypothesis. Results stored in `eval_results/sqa_checkpoints/`. *(Analysis partially done for Qwen, need to revisit and complete.)*
 
-5. **POPE random low accuracy** is consistent across all variants and both backbones. This suggests a systematic issue (model bias, or the split itself) rather than a training problem.
+4. **Does the diagnostic analysis reveal expert specialization by router scheme?** Comparing `dual/kmeans_5000/` with other scheme's `.pt` files could show whether KD-initialized routing leads to more specialized experts.
+
+### New Questions (from recent experiments)
+
+5. **Entropy regularization (w=0.01) shows no clear benefit.** On Qwen: GQA 61.73 vs Student 61.95, SQA 61.80 = Student, TextVQA 48.07 vs 48.08. On Phi2: all metrics slightly below student. On StableLM: slight edge in MME but below on SQA. **Is w=0.01 too weak?** The entropy loss at w=0.01 contributes roughly 0.01 × H to total loss, where H ≈ 1.0–1.4 for 4 experts, so the contribution is ~0.01–0.014 vs LM loss of ~2.5. That's <1% — similar to the KD weight problem. The w=0.1 experiment (qwen_entropy_w01, in progress) will test whether stronger entropy actually helps.
+
+6. **RouterDistillationCallback is disabled — were TS results compromised?** All TS experiments used fixed T=1.0, kd_weight=0.01, ema=0.999 with no dynamic scheduling. The KD loss at these values is <1% of total loss. If re-enabled with stronger values (T=2.0, kd_weight=0.05), TS results might significantly improve. This is the biggest unexplored lever.
+
+7. **K-means anchor erodes during TS training.** At ema=0.999, teacher_weight^{N=3000} ≈ 0.05 × original K-means init. By step 3000 (1/3 of Qwen training), the teacher has drifted almost entirely to track the student. The supposed anchor role of K-means is gone. Options: freeze teacher (no EMA), or use ema=0.9999 (preserves 41% at 9000 steps).
+
+8. **StableLM POPE scores (~74%) are far below paper (85%).** Our POPE popular accuracy for StableLM is 74.3-74.5% vs paper's 85.3%. This is a ~11% gap, much larger than for Qwen or Phi2. Could indicate: (a) the StableLM Stage II checkpoint is different, (b) the eval images are different, or (c) the checkpoint itself was less well-trained. Need to verify the Stage II model used.
+
+9. **Does entropy warmup help?** New `EntropyWarmupCallback` is coded and ready. It ramps entropy weight from 0 to target over first 10% of training. Hypothesis: letting LM loss settle before applying entropy pressure should lead to better-organized routing. Needs a training run to validate.
+
+10. **Should we train a StableLM author (random) baseline?** Currently StableLM only has student, TS, and entropy. Without the random baseline, we can't determine if K-means init actually helps for StableLM. This is a gap in our comparison.
 
 ---
 
@@ -299,22 +451,35 @@ MoE-LLaVA_mine/
 │   ├── model/
 │   │   ├── kd_gate.py                        ← Original KD gate (simpler, no normalization)
 │   │   └── language_model/
-│   │       ├── normalized_router_flexible.py  ← Active KD gate with cosine routing + EMA
+│   │       ├── normalized_router_flexible.py  ← KDTopKGate, NormalizedKDTopKGate, SimplifiedNormalizedGate
 │   │       ├── llava_qwen_moe.py              ← Qwen MoE model
 │   │       ├── llava_phi_moe.py               ← Phi2 MoE model
 │   │       └── llava_stablelm_moe.py          ← StableLM MoE model
 │   ├── train/
-│   │   ├── train.py                           ← Main training script, MoEArguments
-│   │   ├── router_callback.py                 ← Dynamic hyperparameter schedule
+│   │   ├── train.py                           ← Main training script, ModelArguments, entropy_loss_weight
+│   │   ├── router_callback.py                 ← RouterDistillationCallback (DISABLED), EntropyWarmupCallback (active)
 │   │   └── replace_gate.py                    ← Swaps DeepSpeed gate → KD gate
 │   ├── eval/
+│   │   ├── eval_gqa.py                        ← GQA scoring (NOT in gqa/ subfolder!)
 │   │   └── model_routing_probe.py             ← Hooks router gates, saves .pt file
 │   └── vis/
 │       └── vis_dual_routing.py                ← Generates dual_analysis_layer_L.png
 ├── scripts/v1/
-│   ├── qwen/finetune_moe*.sh                  ← Qwen Stage III training scripts
-│   ├── phi2/finetune_moe*.sh                  ← Phi2 Stage III training scripts
-│   └── eval/moe_llava/                        ← All eval scripts
+│   ├── qwen/
+│   │   ├── finetune_moe.sh                    ← Qwen author (random)
+│   │   ├── finetune_moe_entropy.sh            ← Qwen entropy w=0.01
+│   │   └── finetune_moe_entropy_w01.sh        ← Qwen entropy w=0.1
+│   ├── phi2/
+│   │   ├── finetune_moe.sh                    ← Phi2 author
+│   │   └── finetune_moe_entropy.sh            ← Phi2 entropy w=0.01
+│   ├── stablelm/
+│   │   ├── finetune_moe_student.sh            ← StableLM student (no_teacher)
+│   │   └── finetune_moe_TS.sh                 ← StableLM teacher-student
+│   └── eval/moe_llava/
+│       ├── stablelm_all.sh                    ← StableLM: all 5 benchmarks
+│       ├── stablelm_mme_gqa.sh                ← StableLM: MME + GQA only
+│       ├── phi_entropy_all.sh                 ← Phi entropy: all 5 benchmarks
+│       └── qwen_entropy_all.sh                ← Qwen entropy: all 5 benchmarks
 ├── eval_results/
 │   ├── qwen_author/                           ← Final benchmark JSONs
 │   ├── qwen_student/
@@ -327,6 +492,9 @@ MoE-LLaVA_mine/
 │   ├── loss_phi2/plot.py                      ← Phi2 training loss plots
 │   ├── sqa_qwen/plot.py                       ← Qwen SQA-vs-step plots
 │   └── sqa_phi2/plot.py                       ← Phi2 SQA-vs-step plots
+├── plan.md                                    ← Project plan and TODO (KEEP UPDATED)
+├── PROJECT_UNDERSTANDING.md                   ← This file
+├── paper_reference.md                         ← Author's benchmark numbers for comparison
 ├── diagnostic_dataset/
 │   ├── diagnostic_data.json                   ← Images with category labels
 │   └── *.pt                                   ← Pre-computed routing probes

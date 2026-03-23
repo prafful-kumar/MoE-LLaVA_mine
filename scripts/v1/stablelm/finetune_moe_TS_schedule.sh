@@ -1,6 +1,8 @@
 #!/bin/bash
 
-# Activate conda environment
+# Experiment 2: StableLM TS with Temperature + KD Weight Schedule
+# New hyperparameters: Temp 2.0 → 0.8, KD weight 0.05 → 0.01, EMA 0.9999 → 0.99
+
 eval "$(conda shell.bash hook)"
 conda activate moellava_mine
 
@@ -12,10 +14,17 @@ router_aux_loss_coef=0.00
 JSON_FOLDER="train_json"
 IMAGE_FOLDER="IMAGE_FOLDER"
 router_centroids_path="get_kmeans_centroids/fisher_directions/5000.pkl"
-ROUTER_INIT_MODE="no_teacher"
-ENTROPY_LOSS_WEIGHT=0.01
+ROUTER_INIT_MODE="teacher_kd"
 
-HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:2,3,4 --master_port $((13 + 29503)) moellava/train/train_mem.py \
+# New: Router hyperparameter schedule
+ROUTER_TEMP_START=2.0
+ROUTER_TEMP_END=0.8
+ROUTER_WEIGHT_START=0.05
+ROUTER_WEIGHT_END=0.01
+ROUTER_EMA_START=0.9999
+ROUTER_EMA_END=0.99
+
+HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:5,6,7 --master_port $((16 + 29503)) moellava/train/train_mem.py \
     --moe_enable True --num_experts ${num_experts} --top_k_experts ${top_k_experts} --capacity_factor 1.5 \
     --moe_mode ${moe_mode} --use_residual ${use_residual} --router_aux_loss_coef ${router_aux_loss_coef} \
     --train_modules gate_proj up_proj down_proj wg \
@@ -32,7 +41,7 @@ HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:2,3,4
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
-    --output_dir ./checkpoints_stablelm_entropy/llava-stablelm-1.6b-finetune-moe \
+    --output_dir ./checkpoints_stablelm_TS_schedule/llava-stablelm-1.6b-finetune-moe \
     --num_train_epochs 1 \
     --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 4 \
@@ -55,4 +64,9 @@ HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:2,3,4
     --cache_dir "./cache_dir" \
     --router_centroids_path ${router_centroids_path} \
     --router_init_mode ${ROUTER_INIT_MODE} \
-    --entropy_loss_weight ${ENTROPY_LOSS_WEIGHT} 2>&1 | tee logs/train/stablelm_entropy.log
+    --router_temp_start ${ROUTER_TEMP_START} \
+    --router_temp_end ${ROUTER_TEMP_END} \
+    --router_weight_start ${ROUTER_WEIGHT_START} \
+    --router_weight_end ${ROUTER_WEIGHT_END} \
+    --router_ema_start ${ROUTER_EMA_START} \
+    --router_ema_end ${ROUTER_EMA_END} 2>&1 | tee logs/train/stablelm_TS_schedule.log

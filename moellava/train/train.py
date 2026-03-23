@@ -41,7 +41,7 @@ from moellava.mm_utils import tokenizer_image_token
 from PIL import Image
 from moellava.utils import order_pick_k
 
-from moellava.train.router_callback import RouterDistillationCallback
+from moellava.train.router_callback import RouterDistillationCallback, EntropyWarmupCallback
 from moellava.model.language_model.llava_stablelm_moe import remove_teachers_before_save
 
 local_rank = None
@@ -92,6 +92,7 @@ class RouterArguments:
     router_ema_start: float = field(default=0.999, metadata={"help": "Starting EMA decay (Stable)"})
     router_ema_end: float = field(default=0.95, metadata={"help": "Ending EMA decay (Adaptive)"})
     router_total_steps: Optional[int] = field(default=13860, metadata={"help": "Total steps for schedule"})
+    entropy_warmup_ratio: float = field(default=0.1, metadata={"help": "Fraction of training to warmup entropy loss (0.0-1.0)"})
 
 @dataclass
 class ModelArguments:
@@ -1585,36 +1586,42 @@ def train():
                                               data_args=data_args)
                                               
 
-    # print("\n" + "="*40)
-    # print("🚀 ROUTER DISTILLATION CONFIGURATION")
-    # print("="*40)
+    print("\n" + "="*40)
+    print("🚀 ROUTER CONFIGURATION")
+    print("="*40)
+    print(f"  • Mode: {getattr(model_args, 'router_init_mode', 'unknown')}")
+    print(f"  • Temperature : {router_args.router_temp_start} → {router_args.router_temp_end}")
+    print(f"  • KD Weight   : {router_args.router_weight_start} → {router_args.router_weight_end}")
+    print(f"  • EMA Decay   : {router_args.router_ema_start} → {router_args.router_ema_end}")
+    print("="*40 + "\n")
 
-    # # Handle the case where total_steps is None
-    # steps_display = router_args.router_total_steps
-    # if steps_display is None:
-    #     steps_display = "None (Will be auto-calculated from Trainer)"
+    callbacks = [EarlyDenseCheckpointCallback()]
 
-    # print(f"  • Total Steps : {steps_display}")
-    # print(f"  • Temperature : {router_args.router_temp_start} → {router_args.router_temp_end}")
-    # print(f"  • Loss Weight : {router_args.router_weight_start} → {router_args.router_weight_end}")
-    # print(f"  • Teacher EMA : {router_args.router_ema_start} → {router_args.router_ema_end}")
-    # print("="*40 + "\n")
-                                        
-    # Initialize Callback with arguments from bash
-    # router_callback = RouterDistillationCallback(
-    #     total_steps=router_args.router_total_steps,
-    #     temp_start=router_args.router_temp_start, 
-    #     temp_end=router_args.router_temp_end,
-    #     weight_start=router_args.router_weight_start, 
-    #     weight_end=router_args.router_weight_end,
-    #     ema_start=router_args.router_ema_start, 
-    #     ema_end=router_args.router_ema_end
-    # )
+    # Add RouterDistillationCallback for teacher-student (TS) variants
+    if getattr(model_args, 'router_init_mode', None) == 'teacher_kd':
+        router_callback = RouterDistillationCallback(
+            total_steps=router_args.router_total_steps,
+            temp_start=router_args.router_temp_start,
+            temp_end=router_args.router_temp_end,
+            weight_start=router_args.router_weight_start,
+            weight_end=router_args.router_weight_end,
+            ema_start=router_args.router_ema_start,
+            ema_end=router_args.router_ema_end
+        )
+        callbacks.append(router_callback)
+        print("[✓] RouterDistillationCallback enabled for teacher_kd mode\n")
+
+    # Add EntropyWarmupCallback for entropy variants
+    if (getattr(model_args, 'router_init_mode', None) == 'no_teacher'
+            and getattr(model_args, 'entropy_loss_weight', 0.0) > 0.0):
+        entropy_warmup_ratio = getattr(router_args, 'entropy_warmup_ratio', 0.1)
+        callbacks.append(EntropyWarmupCallback(warmup_ratio=entropy_warmup_ratio))
+        print(f"[✓] EntropyWarmupCallback enabled for no_teacher + entropy (warmup={entropy_warmup_ratio:.0%})\n")
 
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,
                     args=training_args,
-                    callbacks=[ EarlyDenseCheckpointCallback()],#KDLogCallback,
+                    callbacks=callbacks,
                     **data_module)
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):

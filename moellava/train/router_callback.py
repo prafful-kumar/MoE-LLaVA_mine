@@ -149,3 +149,83 @@ class RouterDistillationCallback(TrainerCallback):
                 f"EMA={curr_ema:.4f}"
             )
             self.last_log_step = current_step
+
+
+class EntropyWarmupCallback(TrainerCallback):
+    """
+    Linear warmup of entropy_loss_weight for SimplifiedNormalizedGate (no_teacher mode).
+
+    At step 0 the weight is forced to 0. It ramps linearly to the gate's configured
+    entropy_loss_weight over the first `warmup_ratio` fraction of training, then
+    stays constant for the remainder.
+
+    This prevents the entropy penalty from disrupting routing before the LM loss
+    has had a chance to establish basic token-expert assignments.
+    """
+
+    def __init__(self, warmup_ratio=0.1, log_interval=100):
+        self.warmup_ratio = warmup_ratio
+        self.log_interval = log_interval
+        self.total_steps = None
+        self.gate_cache = []
+        self.target_entropy_weights = []   # per-gate target (read once at first step)
+        self._gates_cached = False
+        self.last_log_step = -1
+
+    def on_train_begin(self, args: TrainingArguments, state: TrainerState,
+                       control: TrainerControl, **kwargs):
+        if state.max_steps is not None and state.max_steps > 0:
+            self.total_steps = state.max_steps
+        else:
+            raise ValueError("EntropyWarmupCallback: could not determine total_steps from state.max_steps")
+        warmup_steps = int(self.total_steps * self.warmup_ratio)
+        logger.info(
+            f"[EntropyWarmup] total_steps={self.total_steps}, "
+            f"warmup_ratio={self.warmup_ratio}, warmup_steps={warmup_steps}"
+        )
+
+    def on_step_begin(self, args: TrainingArguments, state: TrainerState,
+                      control: TrainerControl, model=None, **kwargs):
+
+        # Lazy gate caching — runs once on the first step
+        if not self._gates_cached:
+            if model is None:
+                return
+            actual_model = model.module if hasattr(model, 'module') else model
+            from moellava.model.language_model.normalized_router_flexible import SimplifiedNormalizedGate
+            self.gate_cache = [
+                m for m in actual_model.modules()
+                if isinstance(m, SimplifiedNormalizedGate)
+            ]
+            # Record the target weight each gate was configured with
+            self.target_entropy_weights = [g.entropy_loss_weight for g in self.gate_cache]
+            # Zero out immediately so warmup starts from 0
+            for g in self.gate_cache:
+                g.entropy_loss_weight = 0.0
+            self._gates_cached = True
+            logger.info(
+                f"[EntropyWarmup] Cached {len(self.gate_cache)} SimplifiedNormalizedGate(s). "
+                f"Target weights: {self.target_entropy_weights[:4]}..."
+            )
+
+        if not self.gate_cache:
+            return
+
+        current_step = state.global_step
+        warmup_steps = self.warmup_ratio * self.total_steps
+
+        if current_step < warmup_steps:
+            fraction = current_step / warmup_steps
+        else:
+            fraction = 1.0
+
+        for gate, target in zip(self.gate_cache, self.target_entropy_weights):
+            gate.update_hyperparameters(entropy_loss_weight=fraction * target)
+
+        if current_step - self.last_log_step >= self.log_interval:
+            curr_w = fraction * self.target_entropy_weights[0] if self.target_entropy_weights else 0.0
+            logger.info(
+                f"[EntropyWarmup] Step {current_step}/{self.total_steps} "
+                f"({fraction*100:.1f}% warmup) | entropy_weight={curr_w:.5f}"
+            )
+            self.last_log_step = current_step
