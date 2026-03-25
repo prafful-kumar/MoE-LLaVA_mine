@@ -1,4 +1,8 @@
 #!/bin/bash
+# Entropy loss: redesigned top-k aware loss (L_leak + L_imbal).
+# See normalized_router_flexible.py::topk_entropy_loss for formulation.
+# entropy_loss_weight scales the combined L_ent = L_leak + L_imbal.
+# Correct for k=2 (top-2 routing). Reduces to leakage-only for k=1.
 
 # Activate conda environment
 eval "$(conda shell.bash hook)"
@@ -13,7 +17,7 @@ JSON_FOLDER="train_json"
 IMAGE_FOLDER="IMAGE_FOLDER"
 router_centroids_path="get_kmeans_centroids/fisher_directions/5000.pkl"
 ROUTER_INIT_MODE="no_teacher"
-ENTROPY_LOSS_WEIGHT=0.01
+ENTROPY_LOSS_WEIGHT=0.03  # recalibrated: new L_ent ≈ 0.36× old H, so 0.03 ≈ old 0.01
 
 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:2,3,4 --master_port $((13 + 29503)) moellava/train/train_mem.py \
     --moe_enable True --num_experts ${num_experts} --top_k_experts ${top_k_experts} --capacity_factor 1.5 \

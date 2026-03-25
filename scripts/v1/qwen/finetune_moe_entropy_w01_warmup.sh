@@ -1,5 +1,9 @@
 #!/bin/bash
-
+# Entropy loss: redesigned top-k aware loss (L_leak + L_imbal).
+# See normalized_router_flexible.py::topk_entropy_loss for formulation.
+# entropy_loss_weight scales the combined L_ent = L_leak + L_imbal.
+# Correct for k=2 (top-2 routing). Reduces to leakage-only for k=1.
+#
 # Experiment 3: Qwen entropy with stronger entropy warmup
 # Parameters: entropy_loss_weight=0.1 (w01), entropy_warmup_ratio=0.2 (20% instead of 10%)
 

@@ -7,6 +7,60 @@ from typing import Dict, List
 import numpy as np
 
 
+def topk_entropy_loss(router_logits, k, lam=1.0, eps=1e-8):
+    """
+    K-adaptive routing confidence loss.
+
+        L_ent = L_leak + lam * L_imbal
+
+    L_leak  (per-token):
+        Probability mass outside the top-k selected experts.
+        Enforces consistency between the softmax distribution and
+        the discrete top-k routing decision.
+
+    L_imbal (per-token, batch-averaged):
+        E_t[ KL( p_tilde_{T_k} || u_k ) ] = E_t[ log(k) - H(p_tilde_{T_k}) ]
+        Prevents within-k collapse: when k experts are selected, the router
+        should actually use all k slots, not concentrate on 1.
+
+    Why per-token (NOT batch-mean-over-ranks):
+        torch.topk returns values sorted by magnitude, so dim=1 is rank position,
+        not expert identity. Averaging over dim=0 computes a rank distribution, not
+        expert utilization. Per-token is therefore the correct scope.
+
+    Note:
+        lam here is always 1.0 — the external entropy_loss_weight scales the entire
+        L_ent from outside, exactly as it scaled H before. No behavior change to the
+        training script or callbacks is needed.
+
+    Args:
+        router_logits : [T, E]  raw logits before softmax (grad-connected)
+        k             : int, number of selected experts (top_k)
+        lam           : float, relative weight of imbalance vs leakage (default 1.0)
+        eps           : float, numerical stability
+
+    Returns:
+        Scalar loss tensor (grad-connected through router_logits).
+    """
+    probs = F.softmax(router_logits, dim=-1)              # [T, E]
+    topk_probs, _ = torch.topk(probs, k, dim=-1)          # [T, k]
+    topk_mass     = topk_probs.sum(dim=-1)                 # [T]
+
+    # ── L_leak: per-token ───────────────────────────────────────────
+    L_leak = (1.0 - topk_mass).mean()
+
+    # ── L_imbal: per-token KL to uniform-over-k, then batch-averaged
+    if k == 1:
+        L_imbal = router_logits.new_zeros(())
+    else:
+        p_tilde = topk_probs / (topk_mass.unsqueeze(-1) + eps)      # [T, k]
+        H_topk  = -(p_tilde * torch.log(p_tilde + eps)).sum(dim=-1) # [T]
+        log_k   = torch.log(torch.tensor(float(k), device=router_logits.device))
+        L_imbal = (log_k - H_topk).clamp(min=0.0).mean()
+
+    return L_leak + lam * L_imbal
+
+
 class KDTopKGate(TopKGate):
     """
     Knowledge Distillation Gate.
@@ -352,6 +406,8 @@ class SimplifiedNormalizedGate(TopKGate):
         self.last_moe_loss = 0.0
         self.last_kd_loss = 0.0
         self.last_entropy_loss = 0.0
+        self.last_leak_loss = 0.0
+        self.last_imbal_loss = 0.0
 
         with torch.no_grad():
             if fisher_directions is not None:
@@ -408,17 +464,36 @@ class SimplifiedNormalizedGate(TopKGate):
             raw_aux_loss.item() if isinstance(raw_aux_loss, torch.Tensor) else 0.0
         )
 
-        # Entropy regularization — gradients MUST flow through wg.weight
+        # Entropy regularization — topk-aware confidence loss
+        # L_ent = L_leak + L_imbal (replaces broken H→0 minimization)
+        # Gradients flow through wg.weight via logits → softmax → topk_probs
         if self.entropy_loss_weight > 0.0:
             w_normed_fp32 = F.normalize(self.wg.weight.float(), p=2, dim=-1)
             logits = F.linear(input_normed, w_normed_fp32) * self.logit_scale
-            probs = F.softmax(logits.float(), dim=-1)
-            H = -(probs * torch.log(probs + 1e-8)).sum(-1).mean()
-            entropy_loss = self.entropy_loss_weight * H
-            self.last_entropy_loss = H.item()
+            k = self.k  # from DeepSpeed TopKGate
+            L_ent = topk_entropy_loss(logits, k=k, lam=1.0)
+            entropy_loss = self.entropy_loss_weight * L_ent
+
+            # Log components (no_grad, for monitoring only)
+            with torch.no_grad():
+                probs_ng    = F.softmax(logits, dim=-1)
+                topk_p, _   = torch.topk(probs_ng, k, dim=-1)
+                topk_mass_  = topk_p.sum(dim=-1)
+                self.last_leak_loss  = (1.0 - topk_mass_).mean().item()
+                if k > 1:
+                    p_t     = topk_p / (topk_mass_.unsqueeze(-1) + 1e-8)
+                    H_      = -(p_t * torch.log(p_t + 1e-8)).sum(dim=-1)
+                    log_k_  = torch.log(torch.tensor(float(k)))
+                    self.last_imbal_loss = (log_k_ - H_).clamp(min=0.0).mean().item()
+                else:
+                    self.last_imbal_loss = 0.0
+
+            self.last_entropy_loss = L_ent.item()
             total_loss = aux_loss + entropy_loss
         else:
             self.last_entropy_loss = 0.0
+            self.last_leak_loss    = 0.0
+            self.last_imbal_loss   = 0.0
             total_loss = aux_loss
 
         return (total_loss,) + gate_output[1:]
@@ -428,6 +503,8 @@ class SimplifiedNormalizedGate(TopKGate):
             'moe_loss': self.last_moe_loss,
             'kd_loss': 0.0,
             'entropy_loss': self.last_entropy_loss,
+            'leak_loss': self.last_leak_loss,
+            'imbal_loss': self.last_imbal_loss,
             'total_aux_loss': (self.aux_loss_weight * self.last_moe_loss) + (self.entropy_loss_weight * self.last_entropy_loss),
             'temperature': None,
             'ema_decay': None,

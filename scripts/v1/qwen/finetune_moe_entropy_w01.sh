@@ -1,4 +1,8 @@
 #!/bin/bash
+# Entropy loss: redesigned top-k aware loss (L_leak + L_imbal).
+# See normalized_router_flexible.py::topk_entropy_loss for formulation.
+# entropy_loss_weight scales the combined L_ent = L_leak + L_imbal.
+# Correct for k=2 (top-2 routing). Reduces to leakage-only for k=1.
 
 # Activate conda environment
 eval "$(conda shell.bash hook)"
