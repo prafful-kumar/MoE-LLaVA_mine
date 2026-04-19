@@ -148,6 +148,24 @@ class ModelArguments:
 
     entropy_loss_weight: float = field(default=0.0, metadata={"help": "Weight for router entropy regularization loss (no_teacher mode only)"})
 
+    adaptive_gamma: float = field(
+        default=2.0,
+        metadata={"help": "Steepness of confidence gating in margin-aware entropy loss. "
+                           "alpha(m) = exp(-gamma * prob_margin). "
+                           "gamma=2.0: alpha=0.5 at prob_margin=0.35. "
+                           "Only used when use_adaptive_entropy=True."}
+    )
+    use_adaptive_entropy: bool = field(
+        default=False,
+        metadata={"help": "If True, use margin-aware adaptive entropy loss (L_adaptive). "
+                           "If False (default), use topk_entropy_loss. "
+                           "Requires entropy_loss_weight > 0 to have any effect."}
+    )
+
+    imbal_lam: float = field(default=1.0, metadata={"help": "Weight of L_imbal inside L_ent (1.0=v1 compat, 0.1=v2 recommended)"})
+
+    balance_loss_weight: float = field(default=0.0, metadata={"help": "Weight for L_var batch-level expert balance loss"})
+
     # kd_loss_weight: float = field(default=0.01, metadata={"help": "Weight for the Knowledge Distillation loss (Teacher-Student)"})
 
     # ema_decay: float = field(default=0.999, metadata={"help": "Exponential Moving Average decay for the Teacher weights"})
@@ -1595,7 +1613,9 @@ def train():
     print(f"  • EMA Decay   : {router_args.router_ema_start} → {router_args.router_ema_end}")
     print("="*40 + "\n")
 
-    callbacks = [EarlyDenseCheckpointCallback()]
+    callbacks = []
+    if training_args.save_strategy != "epoch":
+        callbacks.append(EarlyDenseCheckpointCallback())
 
     # Add RouterDistillationCallback for teacher-student (TS) variants
     if getattr(model_args, 'router_init_mode', None) == 'teacher_kd':

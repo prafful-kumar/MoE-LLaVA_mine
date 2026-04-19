@@ -20,9 +20,12 @@
 
 ### Local only (`/scratch/prafull/MoE-LLaVA_mine/`)
 
-| Checkpoint | Backbone | Init Mode | Status |
-|---|---|---|---|
-| `checkpoints_qwen_TS_schedule` | Qwen 1.8B | `teacher_kd` + schedule | OK — training complete, not yet backed up to HPC, not yet evaluated |
+| Checkpoint | Backbone | Init Mode | Loss / Key Hyperparams | Status |
+|---|---|---|---|---|
+| `checkpoints_qwen_TS_schedule` | Qwen 1.8B | `teacher_kd` + scheduled hypers | KD + aux=0.0; temp/ema/kd-weight scheduled over training | OK — training complete, not yet backed up to HPC, not yet evaluated |
+| `checkpoints_qwen_entropy_topk_var` | Qwen 1.8B | `no_teacher` | **NEW** topk_entropy_loss (L_leak+L_imbal) w=0.03, imbal_lam=0.1, balance_loss_weight=0.01, aux=0.0 | OK — training complete 2026-04-02, train_loss=1.027, not yet evaluated |
+| `checkpoints_stablelm_entropy_topk_aux` | StableLM 1.6B | `no_teacher` | **NEW** topk_entropy_loss w=0.03 + aux_loss_coef=0.01 combined; ablates aux on top of entropy | OK — training complete, not yet evaluated |
+| `checkpoints_stablelm_entropy_topk_var` | StableLM 1.6B | `no_teacher` | **NEW** topk_entropy_loss w=0.03, imbal_lam=0.1, balance_loss_weight=0.01, aux=0.0 | OK — training complete, not yet evaluated |
 
 ## Missing / Need to Train
 

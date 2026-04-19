@@ -56,8 +56,8 @@ taskset -c 20-29 deepspeed --include localhost:1 --master_port $((RANDOM % 10000
     --model_path /home/prafull/scratch/MoE-LLaVA-main/checkpoints/MoE-LLaVA-Phi2-2.7B-4e \
     --data_path /home/prafull/scratch/MoE-LLaVA-main/${JSON_FOLDER}/llava_image_tune_.json /home/prafull/scratch/MoE-LLaVA-main/${JSON_FOLDER}/nlp_tune.json \
     --image_folder /home/prafull/scratch/MoE-LLaVA-main/${IMAGE_FOLDER} \
-    --output_file fisher_directions_phi/5000.pkl \
+    --output_file fisher_directions_phi/20000.pkl \
     --num_experts 4 \
     --init_method fisher \
     --version phi \
-    --num_samples 5000
+    --num_samples 20000

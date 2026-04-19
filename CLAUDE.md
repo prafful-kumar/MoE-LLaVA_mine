@@ -88,6 +88,11 @@ Supported benchmarks: VQAv2, GQA, TextVQA, ScienceQA, MMBench, POPE, MME, MM-Vet
 - Project path: /scratch/prafull/MoE-LLaVA_mine
 - No sudo access
 
+## Checkpoint Management Rules
+- NEVER reuse an existing `output_dir` 
+- Before writing any training script, check if the output_dir already exists
+- Always add a safety check at the top of training scripts
+
 ## Architecture
 
 ### Model Components
