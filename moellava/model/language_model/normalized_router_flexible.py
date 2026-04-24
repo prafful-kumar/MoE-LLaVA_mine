@@ -430,9 +430,11 @@ class SimplifiedNormalizedGate(TopKGate):
                  entropy_loss_weight=0.0,
                  adaptive_gamma=2.0,
                  use_adaptive_entropy=False,
+                 alpha_mode='exp',
                  imbal_lam=1.0,
                  balance_loss_weight=0.0,
                  normalize_input=True,
+                 z_loss_weight=0.0,  # absorbed here; not used in base class (ZLoss variant handles it)
                  **kwargs):
         super().__init__(model_dim, num_experts, k, **kwargs)
 
@@ -441,6 +443,7 @@ class SimplifiedNormalizedGate(TopKGate):
         self.entropy_loss_weight = entropy_loss_weight
         self.adaptive_gamma = adaptive_gamma
         self.use_adaptive_entropy = use_adaptive_entropy
+        self.alpha_mode = alpha_mode  # 'exp': exp(-gamma*margin)  |  'power': (1-margin)^gamma
         self.imbal_lam = imbal_lam
         self.balance_loss_weight = balance_loss_weight
         self.normalize_input = normalize_input
@@ -523,31 +526,42 @@ class SimplifiedNormalizedGate(TopKGate):
 
                 # Step 1: get top-2 probs per token
                 top2_probs, _ = torch.topk(probs, k=2, dim=-1)  # [T, 2], sorted descending
+                topk_mass = top2_probs.sum(dim=-1)               # [T]
+                L_leak = (1.0 - topk_mass).mean()                # scalar, >= 0
 
                 # Step 2: probability margin in [0, 1] — logit_scale-independent
                 prob_margin = top2_probs[:, 0] - top2_probs[:, 1]  # [T]
 
                 # Step 3: confidence gate alpha — DETACHED so it does not affect gradients
-                alpha = torch.exp(-self.adaptive_gamma * prob_margin).detach()  # [T]
+                # 'exp':   alpha = exp(-gamma * margin)  — soft decay, never reaches 0
+                # 'power': alpha = (1 - margin)^gamma   — hard zero at full confidence (focal-loss style)
+                if self.alpha_mode == 'power':
+                    alpha = (1.0 - prob_margin).clamp(min=0.0).pow(self.adaptive_gamma).detach()  # [T]
+                else:  # default: 'exp'
+                    alpha = torch.exp(-self.adaptive_gamma * prob_margin).detach()  # [T]
 
                 # Step 4: renormalize top-2 probs to form p_tilde
                 p_tilde = top2_probs / (top2_probs.sum(dim=-1, keepdim=True) + 1e-8)  # [T, 2]
 
-                # Step 5: per-token KL( p_tilde || uniform_2 ) = log(2) - H(p_tilde)
-                H_top2 = -(p_tilde * torch.log(p_tilde + 1e-8)).sum(dim=-1)  # [T]
-                kl_per_token = math.log(2) - H_top2  # [T], >= 0
+                # Step 5: per-token entropy of p_tilde (safe clamp to prevent log(0))
+                safe_p_tilde = p_tilde.clamp(min=1e-6)
+                H_top2 = -(safe_p_tilde * torch.log(safe_p_tilde)).sum(dim=-1)  # [T]
 
-                # Step 6: weighted average — confident tokens contribute little
-                L_adaptive = (alpha * kl_per_token).mean()
+                # Step 6: Two-sided adaptive loss
+                # alpha≈0 (confident): L_t ≈ +H → minimising pushes toward one-hot
+                # alpha≈1 (uncertain): L_t ≈ log(2) - H → pushes toward uniform
+                # alpha=0.5 (equilibrium): coefficient on H is zero, no pressure
+                L_per_token = alpha * math.log(2) + (1.0 - 2.0 * alpha) * H_top2  # [T]
+                L_adaptive = L_per_token.clamp(min=-math.log(2)).mean()
 
                 # Logging (unweighted)
                 self.last_entropy_loss = L_adaptive.item()
                 self.last_adaptive_loss = L_adaptive.item()
                 self.last_alpha_mean = alpha.mean().item()
-                self.last_leak_loss = 0.0
+                self.last_leak_loss = L_leak.item()
                 self.last_imbal_loss = 0.0
 
-                total_loss = aux_loss + self.entropy_loss_weight * L_adaptive
+                total_loss = aux_loss + self.entropy_loss_weight * (L_leak + L_adaptive)
 
                 if self.balance_loss_weight > 0.0:
                     L_var = variance_balance_loss(logits)
@@ -616,7 +630,7 @@ class SimplifiedNormalizedGate(TopKGate):
 
     def update_hyperparameters(self, temperature=None, kd_loss_weight=None, ema_decay=None,
                                entropy_loss_weight=None, imbal_lam=None, balance_loss_weight=None,
-                               adaptive_gamma=None, use_adaptive_entropy=None):
+                               adaptive_gamma=None, use_adaptive_entropy=None, alpha_mode=None):
         if entropy_loss_weight is not None:
             self.entropy_loss_weight = entropy_loss_weight
         if imbal_lam is not None:
@@ -627,3 +641,70 @@ class SimplifiedNormalizedGate(TopKGate):
             self.adaptive_gamma = adaptive_gamma
         if use_adaptive_entropy is not None:
             self.use_adaptive_entropy = use_adaptive_entropy
+        if alpha_mode is not None:
+            self.alpha_mode = alpha_mode
+
+
+class SimplifiedNormalizedGateZLoss(SimplifiedNormalizedGate):
+    """
+    Extends SimplifiedNormalizedGate with ST-MoE router z-loss (Zoph et al., 2022).
+
+    Z-loss formula (arXiv 2202.08906):
+        log_z = logsumexp(logits, dim=-1)   # [num_tokens]
+        z_loss = mean(log_z ** 2)           # scalar
+        total_loss += z_loss_weight * z_loss
+
+    The logits are the scaled cosine-similarity scores computed before softmax.
+    All other routing logic is identical to the parent class.
+    """
+
+    def __init__(self, model_dim, num_experts, k=1,
+                 z_loss_weight: float = 0.0,
+                 **kwargs):
+        super().__init__(model_dim, num_experts, k, **kwargs)
+        self.z_loss_weight = z_loss_weight
+        self.last_z_loss = 0.0
+
+    def forward(self, input, used_token=None, use_tutel=False):
+        # Compute scaled cosine-similarity logits for z-loss before calling parent.
+        # This mirrors the parent's logit computation so the same tensor is used.
+        if self.training and self.z_loss_weight > 0.0:
+            input_fp32 = input.float()
+            input_normed = F.normalize(input_fp32, p=2, dim=-1) if self.normalize_input else input_fp32
+            w_normed_fp32 = F.normalize(self.wg.weight.float(), p=2, dim=-1)
+            student_logits = F.linear(input_normed, w_normed_fp32) * self.logit_scale
+        else:
+            student_logits = None
+
+        # Delegate all existing routing + entropy/balance losses to the parent.
+        gate_output = super().forward(input, used_token, use_tutel)
+
+        # --- Router Z-Loss (ST-MoE, Zoph et al. 2022) ---
+        if self.training and self.z_loss_weight > 0.0:
+            log_z = torch.logsumexp(student_logits, dim=-1)
+            z_loss = self.z_loss_weight * (log_z ** 2).mean()
+            self.last_z_loss = z_loss.item()
+            total_loss = gate_output[0] + z_loss
+            return (total_loss,) + gate_output[1:]
+        else:
+            self.last_z_loss = 0.0
+            return gate_output
+
+    def get_loss_dict(self):
+        d = super().get_loss_dict()
+        d['z_loss'] = self.last_z_loss
+        d['total_aux_loss'] = d['total_aux_loss'] + self.last_z_loss
+        return d
+
+    def update_hyperparameters(self, temperature=None, kd_loss_weight=None, ema_decay=None,
+                               entropy_loss_weight=None, imbal_lam=None, balance_loss_weight=None,
+                               adaptive_gamma=None, use_adaptive_entropy=None, alpha_mode=None,
+                               z_loss_weight=None):
+        super().update_hyperparameters(
+            temperature=temperature, kd_loss_weight=kd_loss_weight, ema_decay=ema_decay,
+            entropy_loss_weight=entropy_loss_weight, imbal_lam=imbal_lam,
+            balance_loss_weight=balance_loss_weight, adaptive_gamma=adaptive_gamma,
+            use_adaptive_entropy=use_adaptive_entropy, alpha_mode=alpha_mode,
+        )
+        if z_loss_weight is not None:
+            self.z_loss_weight = z_loss_weight

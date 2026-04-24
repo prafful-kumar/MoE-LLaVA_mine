@@ -3,7 +3,7 @@ set -e
 cd /scratch/prafull/MoE-LLaVA_mine
 
 GPU=${1:-4}
-CKPT="/home/prafull/scratch/hpc/checkpoints_qwen_entropy/llavaqwen-1.8b-finetune-moe"
+CKPT="/scratch/prafull/MoE-LLaVA_mine/checkpoints_qwen_entropy/llavaqwen-1.8b-finetune-moe"
 CONV="qwen"
 EVAL="moellava/eval"
 VARIANT="qwen_entropy"
@@ -113,7 +113,7 @@ python3 scripts/convert_gqa_for_eval.py \
     --dst "${EVAL}/gqa/answers/${VARIANT}/testdev_balanced_predictions.json"
 
 echo "--- GQA Results ---"
-python3 "${EVAL}/gqa/eval_gqa.py" \
+python3 "${EVAL}/eval_gqa.py" \
     --tier testdev_balanced \
     --predictions "${EVAL}/gqa/answers/${VARIANT}/testdev_balanced_predictions.json" \
     --questions "moellava/eval/gqa/data/questions1.2/testdev_balanced_questions.json"

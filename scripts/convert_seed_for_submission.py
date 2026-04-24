@@ -15,7 +15,7 @@ def eval_single(result_file, eval_only_type=None):
     results = {}
     for line in open(result_file):
         row = json.loads(line)
-        results[row['question_id']] = row
+        results[str(row['question_id'])] = row
 
     type_counts = {}
     correct_counts = {}
@@ -23,10 +23,7 @@ def eval_single(result_file, eval_only_type=None):
         if eval_only_type is not None and question_data['data_type'] != eval_only_type: continue
         data_type = question_data['question_type_id']
         type_counts[data_type] = type_counts.get(data_type, 0) + 1
-        try:
-            question_id = int(question_data['question_id'])
-        except:
-            question_id = question_data['question_id']
+        question_id = str(question_data['question_id'])
         if question_id not in results:
             correct_counts[data_type] = correct_counts.get(data_type, 0)
             continue
@@ -64,10 +61,9 @@ if __name__ == "__main__":
     with open(args.result_upload_file, 'w') as fp:
         for question in data['questions']:
             qid = question['question_id']
-            if qid in results:
-                result = results[qid]
-            else:
-                result = results[int(qid)]
+            result = results.get(str(qid))
+            if result is None:
+                continue
             fp.write(json.dumps({
                 'question_id': qid,
                 'prediction': result['text']

@@ -44,7 +44,7 @@ import numpy as np
 from deepspeed.moe.experts import Experts
 
 # from .normalized_router_init_only import NormalizedKDTopKGate
-from .normalized_router_flexible import NormalizedKDTopKGate, SimplifiedNormalizedGate
+from .normalized_router_flexible import NormalizedKDTopKGate, SimplifiedNormalizedGate, SimplifiedNormalizedGateZLoss
 
 local_rank = None
 
@@ -940,8 +940,10 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
                         # --- NORMALIZATION FIX END ---
             
             elif init_mode == 'no_teacher':
-                print(f"Layer {layer_num} (StableLM): Initializing Simplified Normalized Router (No Teacher)")
-                kd_gate = SimplifiedNormalizedGate(
+                _z_loss_weight = getattr(model_args, 'z_loss_weight', 0.0)
+                _GateCls = SimplifiedNormalizedGateZLoss if _z_loss_weight > 0.0 else SimplifiedNormalizedGate
+                print(f"Layer {layer_num} (StableLM): Initializing {_GateCls.__name__} (No Teacher)")
+                kd_gate = _GateCls(
                     model_dim=self.config.hidden_size,
                     num_experts=num_experts,
                     k=model_args.top_k_experts,
@@ -951,9 +953,11 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
                     entropy_loss_weight=getattr(model_args, 'entropy_loss_weight', 0.0),
                     adaptive_gamma=getattr(model_args, 'adaptive_gamma', 2.0),
                     use_adaptive_entropy=getattr(model_args, 'use_adaptive_entropy', False),
+                    alpha_mode=getattr(model_args, 'alpha_mode', 'exp'),
                     imbal_lam=getattr(model_args, 'imbal_lam', 1.0),
                     balance_loss_weight=getattr(model_args, 'balance_loss_weight', 0.0),
                     normalize_input=getattr(model_args, 'normalize_router_input', True),
+                    z_loss_weight=_z_loss_weight,
                     min_capacity=model_args.min_capacity,
                     capacity_factor=model_args.capacity_factor,
                     eval_capacity_factor=model_args.eval_capacity_factor

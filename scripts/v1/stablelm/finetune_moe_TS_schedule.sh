@@ -21,10 +21,10 @@ ROUTER_TEMP_START=2.0
 ROUTER_TEMP_END=0.8
 ROUTER_WEIGHT_START=0.05
 ROUTER_WEIGHT_END=0.01
-ROUTER_EMA_START=0.9999
-ROUTER_EMA_END=0.99
+ROUTER_EMA_START=0.999
+ROUTER_EMA_END=0.95
 
-HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:5,6,7 --master_port $((16 + 29503)) moellava/train/train_mem.py \
+HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:0,1,2 --master_port $((16 + 29503)) moellava/train/train_mem.py \
     --moe_enable True --num_experts ${num_experts} --top_k_experts ${top_k_experts} --capacity_factor 1.5 \
     --moe_mode ${moe_mode} --use_residual ${use_residual} --router_aux_loss_coef ${router_aux_loss_coef} \
     --train_modules gate_proj up_proj down_proj wg \
@@ -48,7 +48,7 @@ HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:5,6,7
     --gradient_accumulation_steps 12 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 3000 \
+    --save_steps 24000 \
     --save_total_limit 20 \
     --learning_rate 2e-5 \
     --weight_decay 0. \

@@ -29,6 +29,8 @@ These checkpoints were overwritten because new training used the same output_dir
 | Phi2 Student | `checkpoints_phi_student/llavaphi-2.7b-finetune-moe` | no_teacher | aux=0.0 | centroids=fisher_directions_phi/5000.pkl | Yes (5/5) — POPE rerun pending |
 | Phi2 TS | `checkpoints_phi_TS/llavaphi-2.7b-finetune-moe` | teacher_kd | KD + aux=0.0 | centroids=fisher_directions_phi/5000.pkl | Yes (5/5) — POPE rerun pending |
 | Phi2 Entropy-topk | `checkpoints_phi_entropy/llavaphi-2.7b-finetune-moe` | no_teacher | topk_entropy w=0.03, aux=0.0 | centroids=fisher_directions_phi/5000.pkl | Yes (5/5) — POPE rerun pending |
+| Phi2 Adaptive Entropy | `checkpoints_phi_adaptive_entropy/llavaphi-2.7b-finetune-moe` | no_teacher | adaptive_entropy w=0.03, gamma=2.0, aux=0.0 | centroids=fisher_directions_phi/5000.pkl ⚠️ retrain with 20k | 🔄 **Training GPU 0,1,2,3 (started 2026-04-20)** |
+| Phi2 Adaptive Entropy + L_var | `checkpoints_phi_adaptive_entropy_var/llavaphi-2.7b-finetune-moe` | no_teacher | adaptive_entropy w=0.03, gamma=2.0, w_bal=0.01, aux=0.0 | centroids=fisher_directions_phi/5000.pkl | ❌ Not started |
 | Phi2 Old Entropy | **LOST** | no_teacher | old broken H w=0.01, aux=0.0 | centroids=fisher_directions_phi/5000.pkl | Yes (results in xlsx) |
 
 ### Qwen (1.8B) — 3 GPUs, batch=2, grad_accum=12
@@ -41,7 +43,8 @@ These checkpoints were overwritten because new training used the same output_dir
 | Qwen TS Schedule | `checkpoints_qwen_TS_schedule/llavaqwen-1.8b-finetune-moe` | teacher_kd | KD + aux=0.0 (scheduled hypers) | centroids=fisher_directions_qwen/5000.pkl | **Eval RUNNING GPU 7 (pos 1/5)** |
 | Qwen Entropy-topk | `checkpoints_qwen_entropy/llavaqwen-1.8b-finetune-moe` | no_teacher | topk_entropy w=0.03, aux=0.0 | centroids=fisher_directions_qwen/5000.pkl | Yes (5/5) — POPE rerun pending |
 | Qwen Entropy-topk-var | `checkpoints_qwen_entropy_topk_var/llavaqwen-1.8b-finetune-moe` | no_teacher | topk_entropy w=0.03, lam=0.1, w_bal=0.01, aux=0.0 | centroids=fisher_directions_qwen/5000.pkl | **Eval RUNNING GPU 7 (pos 2/5)** |
-| Qwen Adaptive Entropy | `checkpoints_qwen_adaptive_entropy/llavaqwen-1.8b-finetune-moe` | no_teacher | adaptive_entropy w=0.03, gamma=2.0, aux=0.0 | centroids=fisher_directions_qwen/5000.pkl ⚠️ retrain with 20k | **Training GPU 3,4,5 (started 2026-04-19)** |
+| Qwen Adaptive Entropy | `checkpoints_qwen_adaptive_entropy/llavaqwen-1.8b-finetune-moe` | no_teacher | adaptive_entropy w=0.03, gamma=2.0, aux=0.0 | centroids=fisher_directions_qwen/5000.pkl ⚠️ retrain with 20k | **✅ Done (2026-04-20). Eval pending.** |
+| Qwen Adaptive Entropy + L_var | `checkpoints_qwen_adaptive_entropy_var/llavaqwen-1.8b-finetune-moe` | no_teacher | adaptive_entropy w=0.03, gamma=2.0, w_bal=0.01, aux=0.0 | centroids=fisher_directions_qwen/5000.pkl | ❌ Not started |
 | Qwen Old Entropy w=0.01 | **LOST** | no_teacher | old broken H w=0.01, aux=0.0 | centroids=fisher_directions_qwen/5000.pkl | Yes (results in xlsx) |
 | Qwen Old Entropy w=0.1 | `checkpoints_qwen_entropy_w01/llavaqwen-1.8b-finetune-moe` | no_teacher | old broken H w=0.1, aux=0.0 | centroids=fisher_directions_qwen/5000.pkl | Yes (5/5) |
 
@@ -56,6 +59,7 @@ These checkpoints were overwritten because new training used the same output_dir
 | StableLM Entropy-topk-aux | `checkpoints_stablelm_entropy_topk_aux/llava-stablelm-1.6b-finetune-moe` | no_teacher | topk_entropy w=0.03 + aux=0.01 | centroids=fisher_directions/5000.pkl | **Eval RUNNING GPU 7 (pos 3/5)** |
 | StableLM Entropy-topk-var | `checkpoints_stablelm_entropy_topk_var/llava-stablelm-1.6b-finetune-moe` | no_teacher | topk_entropy w=0.03, lam=0.1, w_bal=0.01, aux=0.0 | centroids=fisher_directions/5000.pkl | **Eval RUNNING GPU 7 (pos 4/5)** |
 | StableLM Adaptive Entropy | `checkpoints_stablelm_adaptive_entropy/llava-stablelm-1.6b-finetune-moe` | no_teacher | adaptive_entropy w=0.03, gamma=2.0, aux=0.0 | centroids=fisher_directions/5000.pkl ⚠️ retrain with 20k | **✅ Done (2026-04-18). Eval pending.** |
+| StableLM Adaptive Entropy + L_var | `checkpoints_stablelm_adaptive_entropy_var/llava-stablelm-1.6b-finetune-moe` | no_teacher | adaptive_entropy w=0.03, gamma=2.0, w_bal=0.01, aux=0.0 | centroids=fisher_directions/5000.pkl | ❌ Not started |
 | StableLM Old Entropy | **LOST** | no_teacher | old broken H w=0.01, aux=0.0 | centroids=fisher_directions/5000.pkl | Yes (results in xlsx) |
 
 ### Common Hyperparameters (all experiments unless noted)
@@ -96,7 +100,11 @@ These checkpoints were overwritten because new training used the same output_dir
 - [x] **StableLM Entropy-topk + aux=0.01** — topk_entropy_loss w=0.03 + aux_loss_coef=0.01. Done. **Eval: RUNNING GPU 7 (queue pos 3/5).**
 - [x] **StableLM Entropy-topk-var** — topk_entropy_loss w=0.03, imbal_lam=0.1, w_bal=0.01, aux=0.0. Done. **Eval: RUNNING GPU 7 (queue pos 4/5).**
 - [x] **StableLM Adaptive Entropy** — adaptive_entropy w=0.03, gamma=2.0, aux=0.0. Done 2026-04-18. Script: `scripts/v1/stablelm/finetune_moe_adaptive_entropy.sh`. Output dir: `checkpoints_stablelm_adaptive_entropy/`. ⚠️ Used 5000-pt centroids — retrain with 20000-pt when compute budget allows.
-- 🔄 **Qwen Adaptive Entropy** — adaptive_entropy w=0.03, gamma=2.0, aux=0.0. **Training GPU 3,4,5 (started 2026-04-19).** Script: `scripts/v1/qwen/finetune_moe_adaptive_entropy.sh`. Output dir: `checkpoints_qwen_adaptive_entropy/`. ⚠️ Used 5000-pt centroids — retrain with 20000-pt when compute budget allows.
+- ✅ **Qwen Adaptive Entropy** — adaptive_entropy w=0.03, gamma=2.0, aux=0.0. Done 2026-04-20. Script: `scripts/v1/qwen/finetune_moe_adaptive_entropy.sh`. Output dir: `checkpoints_qwen_adaptive_entropy/`. ⚠️ Used 5000-pt centroids.
+- 🔄 **Phi2 Adaptive Entropy** — adaptive_entropy w=0.03, gamma=2.0, aux=0.0. **Training GPU 0,1,2,3 (started 2026-04-20).** Script: `scripts/v1/phi2/finetune_moe_adaptive_entropy.sh`. Output dir: `checkpoints_phi_adaptive_entropy/`. ⚠️ Used 5000-pt centroids.
+- [ ] **Phi2 Adaptive Entropy + L_var** — adaptive_entropy w=0.03, gamma=2.0, w_bal=0.01, aux=0.0. Script: TBD. Output dir: `checkpoints_phi_adaptive_entropy_var/`.
+- [ ] **Qwen Adaptive Entropy + L_var** — adaptive_entropy w=0.03, gamma=2.0, w_bal=0.01, aux=0.0. Script: TBD. Output dir: `checkpoints_qwen_adaptive_entropy_var/`.
+- [ ] **StableLM Adaptive Entropy + L_var** — adaptive_entropy w=0.03, gamma=2.0, w_bal=0.01, aux=0.0. Script: TBD. Output dir: `checkpoints_stablelm_adaptive_entropy_var/`.
 
 ### Training — Never Trained (no checkpoint exists)
 - [ ] **Phi2 no_teacher** — Qwen and StableLM have `no_teacher` (SimplifiedNormalizedGate, no entropy, no KD) but Phi2 does not. `checkpoints_phi_student/` was trained with `student_warm` (vanilla DeepSpeed TopKGate + centroid warm-start) — a different gate class. Need new script with `ROUTER_INIT_MODE="no_teacher"`, `entropy_loss_weight=0.0`. Output dir: `checkpoints_phi_no_teacher/` **CANCELLED 2026-04-06 at 10% — stopped to run ablation experiments instead. Checkpoint deleted.**
@@ -108,6 +116,47 @@ These checkpoints were overwritten because new training used the same output_dir
 - [ ] Eval all retrained entropy checkpoints on 5 benchmarks after training completes
 - [ ] Transfer retrained checkpoints to HPC with `rsync -av --no-g`
 - [ ] Update `benchmark_results.xlsx` with new results
+
+---
+
+## Power-Law Alpha Variants (Future)
+
+**Idea:** Replace the exponential confidence gate in `use_adaptive_entropy=True` with a power-law form:
+
+| Formula | Current (exponential) | Proposed (power-law) |
+|---|---|---|
+| alpha | `exp(-gamma * margin)` | `(1 - margin)^gamma` |
+| alpha at margin=0 | 1.0 | 1.0 |
+| alpha at margin=1 | `exp(-gamma)` > 0 | 0.0 (hard zero) |
+| Behavior | Soft decay, never reaches 0 | Hard zero at full confidence; focal-loss style |
+
+**Why power-law is more aggressive:**
+- At margin=1 (perfectly confident token), exponential gives `exp(-2) ≈ 0.135` — still applies small one-hot push.
+- Power-law gives exactly 0 — completely removes pressure on confident tokens.
+- For intermediate margins, `(1-m)^gamma` decays faster than `exp(-gamma*m)` for gamma≥2 near m=0.
+- Analogy: focal loss `(1-p)^gamma` in object detection — same motivation (down-weight easy examples).
+
+**Code change in `normalized_router_flexible.py`** (single line, `SimplifiedNormalizedGate.forward()`):
+```python
+# Current:
+alpha = torch.exp(-self.adaptive_gamma * prob_margin).detach()
+# Proposed:
+alpha = (1.0 - prob_margin).pow(self.adaptive_gamma).detach()
+```
+
+**Experiments to run** (after double_adaptive variants are evaluated):
+
+| Priority | Backbone | Checkpoint Dir | Params | Status |
+|---|---|---|---|---|
+| P1 | StableLM 1.6B | `checkpoints_stablelm_power_adaptive/` | `alpha_mode=power, w_ent=0.1, w_bal=0.1, gamma=2.0` | **🔄 Training GPUs 0,1,2 (started 2026-04-24)** |
+| P2 | Qwen 1.8B | `checkpoints_qwen_power_adaptive/` | same | ❌ Not started |
+| P3 | Phi2 2.7B | `checkpoints_phi_power_adaptive/` | same | ❌ Not started |
+
+**Implementation notes:**
+- The `adaptive_gamma` parameter reuses for both formulas; no new arg needed.
+- Consider adding a new `--alpha_mode` flag (`exp` vs `power`) to `train.py` `RouterArguments` and `SimplifiedNormalizedGate.__init__` so both variants can be run without code change.
+- Gate the formula with `if self.alpha_mode == 'power': alpha = (1-m).pow(gamma) else: alpha = exp(-gamma*m)`.
+- All other loss terms (L_leak, L_adaptive two-sided, L_var) remain unchanged.
 
 ---
 

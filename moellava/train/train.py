@@ -151,8 +151,9 @@ class ModelArguments:
     adaptive_gamma: float = field(
         default=2.0,
         metadata={"help": "Steepness of confidence gating in margin-aware entropy loss. "
-                           "alpha(m) = exp(-gamma * prob_margin). "
-                           "gamma=2.0: alpha=0.5 at prob_margin=0.35. "
+                           "exp mode:   alpha(m) = exp(-gamma * prob_margin). "
+                           "power mode: alpha(m) = (1 - prob_margin)^gamma. "
+                           "gamma=2.0: alpha=0.5 at prob_margin~0.35 (exp) or 0.29 (power). "
                            "Only used when use_adaptive_entropy=True."}
     )
     use_adaptive_entropy: bool = field(
@@ -161,10 +162,21 @@ class ModelArguments:
                            "If False (default), use topk_entropy_loss. "
                            "Requires entropy_loss_weight > 0 to have any effect."}
     )
+    alpha_mode: str = field(
+        default='exp',
+        metadata={"help": "Confidence gate formula for adaptive entropy. "
+                           "'exp' (default): alpha = exp(-gamma * prob_margin) — soft decay, never reaches 0. "
+                           "'power': alpha = (1 - prob_margin)^gamma — hard zero at full confidence (focal-loss style). "
+                           "Only used when use_adaptive_entropy=True."}
+    )
 
     imbal_lam: float = field(default=1.0, metadata={"help": "Weight of L_imbal inside L_ent (1.0=v1 compat, 0.1=v2 recommended)"})
 
     balance_loss_weight: float = field(default=0.0, metadata={"help": "Weight for L_var batch-level expert balance loss"})
+
+    z_loss_weight: float = field(default=0.0,
+        metadata={"help": "ST-MoE router z-loss weight (Zoph et al. 2022). "
+                          "Paper uses 0.001. Set 0.0 to disable."})
 
     # kd_loss_weight: float = field(default=0.01, metadata={"help": "Weight for the Knowledge Distillation loss (Teacher-Student)"})
 
@@ -1631,12 +1643,9 @@ def train():
         callbacks.append(router_callback)
         print("[✓] RouterDistillationCallback enabled for teacher_kd mode\n")
 
-    # Add EntropyWarmupCallback for entropy variants
-    if (getattr(model_args, 'router_init_mode', None) == 'no_teacher'
-            and getattr(model_args, 'entropy_loss_weight', 0.0) > 0.0):
-        entropy_warmup_ratio = getattr(router_args, 'entropy_warmup_ratio', 0.1)
-        callbacks.append(EntropyWarmupCallback(warmup_ratio=entropy_warmup_ratio))
-        print(f"[✓] EntropyWarmupCallback enabled for no_teacher + entropy (warmup={entropy_warmup_ratio:.0%})\n")
+    # EntropyWarmupCallback intentionally removed:
+    # Fisher/K-means centroid init gives the router meaningful semantic boundaries at Step 0,
+    # so warmup is unnecessary — entropy pressure is beneficial from the first step.
 
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,

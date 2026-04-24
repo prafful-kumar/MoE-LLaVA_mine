@@ -19,7 +19,7 @@ router_centroids_path="get_kmeans_centroids/fisher_directions/5000.pkl"
 ROUTER_INIT_MODE="no_teacher"
 ENTROPY_LOSS_WEIGHT=0.03  # recalibrated: new L_ent ≈ 0.36× old H, so 0.03 ≈ old 0.01
 
-HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:2,3,4 --master_port $((13 + 29503)) moellava/train/train_mem.py \
+HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:0,1,2 --master_port $((13 + 29503)) moellava/train/train_mem.py \
     --moe_enable True --num_experts ${num_experts} --top_k_experts ${top_k_experts} --capacity_factor 1.5 \
     --moe_mode ${moe_mode} --use_residual ${use_residual} --router_aux_loss_coef ${router_aux_loss_coef} \
     --train_modules gate_proj up_proj down_proj wg \
@@ -43,7 +43,7 @@ HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed --include localhost:2,3,4
     --gradient_accumulation_steps 12 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 3000 \
+    --save_steps 24000 \
     --save_total_limit 20 \
     --learning_rate 2e-5 \
     --weight_decay 0. \
