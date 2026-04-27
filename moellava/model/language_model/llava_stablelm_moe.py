@@ -777,18 +777,17 @@ class MoELLaVAStablelmForCausalLM(StableLMEpochForCausalLM, LlavaMetaForCausalLM
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
+            self._last_lm_loss = loss.detach().item()  # store before adding MoE penalty
 
         moe_loss, moe_losses = None, []
         if len(outputs[-1]) > 0:
             moe_loss_list = outputs[-1]
-            # import ipdb
-            # ipdb.set_trace()
             for moe_loss in moe_loss_list:
                 if moe_loss is not None:
                     moe_losses.append(moe_loss)
             moe_loss = self.router_aux_loss_coef * sum(moe_losses)
+            self._last_moe_loss = moe_loss.detach().item()
             if labels is not None:
-                # print(loss, sum(moe_losses), loss + moe_loss)
                 loss += moe_loss
         # import ipdb
         # ipdb.set_trace()

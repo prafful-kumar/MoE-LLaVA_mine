@@ -57,7 +57,10 @@ def load_model_for_inference(model_path, device="cuda"):
     # DeepSpeed needs distributed env vars even for single-GPU inference.
     # Set them if not already present so deepspeed.init_distributed works
     # without requiring an MPI launcher.
-    for k, v in [("MASTER_ADDR", "localhost"), ("MASTER_PORT", "12388"),
+    # Derive a unique port from the GPU id so parallel jobs don't clash.
+    gpu_id = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+    gpu_port = str(12400 + int(gpu_id) if gpu_id.isdigit() else 12388)
+    for k, v in [("MASTER_ADDR", "localhost"), ("MASTER_PORT", gpu_port),
                  ("RANK", "0"), ("LOCAL_RANK", "0"), ("WORLD_SIZE", "1")]:
         os.environ.setdefault(k, v)
 

@@ -101,7 +101,8 @@ These checkpoints were overwritten because new training used the same output_dir
 - [x] **StableLM Entropy-topk-var** — topk_entropy_loss w=0.03, imbal_lam=0.1, w_bal=0.01, aux=0.0. Done. **Eval: RUNNING GPU 7 (queue pos 4/5).**
 - [x] **StableLM Adaptive Entropy** — adaptive_entropy w=0.03, gamma=2.0, aux=0.0. Done 2026-04-18. Script: `scripts/v1/stablelm/finetune_moe_adaptive_entropy.sh`. Output dir: `checkpoints_stablelm_adaptive_entropy/`. ⚠️ Used 5000-pt centroids — retrain with 20000-pt when compute budget allows.
 - ✅ **Qwen Adaptive Entropy** — adaptive_entropy w=0.03, gamma=2.0, aux=0.0. Done 2026-04-20. Script: `scripts/v1/qwen/finetune_moe_adaptive_entropy.sh`. Output dir: `checkpoints_qwen_adaptive_entropy/`. ⚠️ Used 5000-pt centroids.
-- 🔄 **Phi2 Adaptive Entropy** — adaptive_entropy w=0.03, gamma=2.0, aux=0.0. **Training GPU 0,1,2,3 (started 2026-04-20).** Script: `scripts/v1/phi2/finetune_moe_adaptive_entropy.sh`. Output dir: `checkpoints_phi_adaptive_entropy/`. ⚠️ Used 5000-pt centroids.
+- ❌ **Phi2 Adaptive Entropy** — adaptive_entropy w=0.03, gamma=2.0, aux=0.0. **Did NOT run** (no checkpoint at HPC, GPUs 0-3 show idle). Script: `scripts/v1/phi2/finetune_moe_adaptive_entropy.sh`. Output dir: `checkpoints_phi_adaptive_entropy/`. ⚠️ Used 5000-pt centroids. Needs to be relaunched.
+- 🔄 **StableLM Power Adaptive v3** — adaptive_entropy, alpha_mode=power, gamma=2.0, w_bal=0.1, aux=0.1. **Training GPUs 5,6,7 (started 2026-04-26).** Output dir: `checkpoints_stablelm_power_adaptive_v3/llava-stablelm-1.6b-finetune-moe`. Centroids: `fisher_directions/5000.pkl`.
 - [ ] **Phi2 Adaptive Entropy + L_var** — adaptive_entropy w=0.03, gamma=2.0, w_bal=0.01, aux=0.0. Script: TBD. Output dir: `checkpoints_phi_adaptive_entropy_var/`.
 - [ ] **Qwen Adaptive Entropy + L_var** — adaptive_entropy w=0.03, gamma=2.0, w_bal=0.01, aux=0.0. Script: TBD. Output dir: `checkpoints_qwen_adaptive_entropy_var/`.
 - [ ] **StableLM Adaptive Entropy + L_var** — adaptive_entropy w=0.03, gamma=2.0, w_bal=0.01, aux=0.0. Script: TBD. Output dir: `checkpoints_stablelm_adaptive_entropy_var/`.
@@ -148,7 +149,8 @@ alpha = (1.0 - prob_margin).pow(self.adaptive_gamma).detach()
 
 | Priority | Backbone | Checkpoint Dir | Params | Status |
 |---|---|---|---|---|
-| P1 | StableLM 1.6B | `checkpoints_stablelm_power_adaptive/` | `alpha_mode=power, w_ent=0.1, w_bal=0.1, gamma=2.0` | **🔄 Training GPUs 0,1,2 (started 2026-04-24)** |
+| P1 | StableLM 1.6B | `checkpoints_stablelm_power_adaptive/` | `alpha_mode=power, w_ent=0.1, w_bal=0.1, gamma=2.0` | **✅ Done (2026-04-24). Eval pending. ⚠️ Trained with .data-swap gradient bug — use v2 for correct results.** |
+| P1-v2 | StableLM 1.6B | `checkpoints_stablelm_power_adaptive_v2/` | same + gradient fix (register_parametrization) | **🔄 Training GPUs 4,5,6 (started 2026-04-25)** |
 | P2 | Qwen 1.8B | `checkpoints_qwen_power_adaptive/` | same | ❌ Not started |
 | P3 | Phi2 2.7B | `checkpoints_phi_power_adaptive/` | same | ❌ Not started |
 

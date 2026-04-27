@@ -214,6 +214,197 @@ python diagnostics/plot_routing_stability.py \
 
 ---
 
+## Panel F — Training-Distribution Routing Specialization
+
+**Question:** Does the router differentiate by data source (COCO, GQA, OCR-VQA, TextVQA, VG, NLP) on the actual training distribution, or does it route all sources uniformly?
+
+Source labels come from the data itself (image subfolder name / NLP for text-only) — not from a hand-crafted probe set, eliminating the cherry-picking objection.
+
+**Probe script:** `moellava/eval/model_routing_probe_train_dist.py`  
+**Vis script:** `moellava/vis/vis_train_dist_routing.py`  
+**Shell driver:** `scripts/v1/stablelm/viz_train_dist_routing.sh`  
+**Output root:** `train_dist_analysis/<ckpt_folder>/`
+
+### Sub-figures produced per checkpoint
+| Filename | Content |
+|----------|---------|
+| `specialization_heatmap.png` | **Fig A** — `[n_sources × n_layers]` grid; cell color = dominant expert, opacity = routing strength. Side-by-side: image tokens vs text tokens. |
+| `specialization_score.png` | **Fig B** — Mean pairwise symmetric KL divergence between source routing distributions, per layer. Single-number comparison metric between methods. |
+| `best_layer_detail.png` | **Fig C** — Grouped bar chart for top-3 most specialized layers; verifies heatmap signal. |
+| `dual_detail/dual_analysis_layer_L_category.png` | Per-layer t-SNE + bar charts from `vis_dual_routing_v2.py` (color_by=source). |
+
+### Data source labels (derived automatically from image paths)
+| Label | Source | Rough N in training data |
+|-------|--------|--------------------------|
+| `coco` | COCO (LLaVA-Instruct) | ~500k |
+| `gqa` | GQA scene graphs | ~72k |
+| `ocr_vqa` | OCR-VQA | ~207k |
+| `textvqa` | TextVQA | ~21k |
+| `vg` | Visual Genome | ~86k |
+| `nlp` | Text-only (nlp_tune.json) | ~41k |
+
+### Existing data files
+| File | Checkpoint | Samples/source | Status |
+|------|-----------|----------------|--------|
+| *(none yet — run the shell script)* | — | — | Pending |
+
+### How to run
+```bash
+# Full pipeline: probe + 3 summary plots + dual detail for selected layers
+bash scripts/v1/stablelm/viz_train_dist_routing.sh
+# GPU 3, ~80 samples/source, ~480 total samples per checkpoint
+```
+
+To compare two checkpoints (method vs baseline), add both paths to `CKPT_FOLDERS` in the shell script and overlay their `specialization_score.png` plots.
+
+### Comparing with existing vis infrastructure
+The `.pt` output is format-compatible with `vis_dual_routing_v2.py` (uses `category=source_label`), so any per-layer detail plot from that script works on the new data without changes.
+
+---
+
+---
+
+## NeurIPS Figure 1 — Routing Confidence Distribution (Qwen backbone)
+
+**Folder:** `neurips/fig2_routing_confidence/`  
+**Purpose:** Show that author (random init) keeps routing near-uniform (split_ratio ≈ 0.5) whereas our entropy variants collapse to committed routing (split_ratio ≈ 1.0). Motivates the entropy loss as a way to drive specialisation.
+
+**Metric:** `split_ratio` = max(p_top1, p_top2) / (p_top1 + p_top2) ∈ [0.5, 1.0]  
+- 0.5 → both selected experts get equal weight (uncertain/sharing)  
+- 1.0 → one expert gets everything (committed/collapsed)
+
+**Scripts:**
+- `neurips/fig2_routing_confidence/collect.py` — hooks `gate.wg`, runs N SQA questions, saves per-layer split_ratios to `.npz`
+- `neurips/fig2_routing_confidence/plot.py` — produces `v1_side_by_side`, `v2_overlay`, `v3_annotated` variants
+
+### Collected data files (`neurips/fig2_routing_confidence/data/`)
+| File | Model | Dataset | N | Key finding |
+|------|-------|---------|---|-------------|
+| `author.npz` | checkpoints_qwen_author | SQA | 1000 | median=0.535, 62% sharing, 0% committed |
+| `adaptive_entropy.npz` | checkpoints_qwen_entropy | SQA | 1000 | median=0.999, 2.3% sharing, 78% committed |
+| `power_adaptive.npz` | checkpoints_qwen_power_adaptive_v2 | SQA | 1000 | median=0.999, 2.3% sharing, 78% committed — identical to adaptive_entropy |
+
+**Finding:** No bimodal distribution found in any Qwen variant. Author clusters near 0.5 (uncertain); entropy variants collapse to a spike at 1.0 (over-committed). The paper narrative is: author = uncertain, ours = commits. True bimodal target not yet achieved.
+
+### How to run
+```bash
+python neurips/fig2_routing_confidence/collect.py \
+    --model_path <ckpt_path> --label <label> --n_samples 1000 --gpu 6
+
+python neurips/fig2_routing_confidence/plot.py \
+    --files neurips/fig2_routing_confidence/data/author.npz \
+            neurips/fig2_routing_confidence/data/adaptive_entropy.npz \
+    --labels "Author (random)" "Ours (adaptive entropy)"
+```
+
+---
+
+## NeurIPS Figure 2 — Routing Confidence Distribution (StableLM backbone)
+
+**Folder:** `neurips/fig3_stablelm_routing/`  
+**Purpose:** Same split_ratio analysis for StableLM backbone, comparing author (random), TS (K-means), and adaptive_entropy variants. Reveals that StableLM TS does NOT collapse (unlike Qwen entropy variants) while adaptive_entropy does.
+
+**Scripts:**
+- `neurips/fig3_stablelm_routing/collect.py` — same as fig2 but with two critical fixes:
+  1. **DeepSpeed bypass:** StableLM checkpoints using `SimplifiedNormalizedGate` don't save `wg.weight`, causing meta-tensor crash when `deepspeed.init_inference` tries to move them to GPU. Fixed by monkey-patching `deepspeed.init_inference` to return a stub (`_DSEngineStub`) before any imports.
+  2. **Port isolation:** `MASTER_PORT` derived from `CUDA_VISIBLE_DEVICES` (`12400 + gpu_id`) to prevent `Address already in use` when multiple jobs run in parallel.
+- `neurips/fig3_stablelm_routing/plot.py` — identical to fig2/plot.py with updated paths
+
+### Collected data files (`neurips/fig3_stablelm_routing/data/`)
+| File | Model | Dataset | N | Key finding |
+|------|-------|---------|---|-------------|
+| `stablelm_author.npz` | hpc/random_no_KD_0.01_aux | SQA | 1000 | median=0.535, 61.9% sharing, 0.0% committed — uncertain |
+| `stablelm_TS.npz` | checkpoints_stablelm_TS | SQA | 1000 | median=0.555, 46.8% sharing, 0.2% committed — also near-uncertain |
+| `stablelm_adaptive_entropy.npz` | checkpoints_stablelm_adaptive_entropy | SQA | 1000 | median=0.995, 4.3% sharing, 69.4% committed — collapsed |
+
+**Finding:** StableLM TS initialization alone does not cause routing collapse (unlike Qwen entropy variants). Only adaptive_entropy collapses. This shows the entropy loss is the driving factor, not K-means init alone.
+
+### How to run
+```bash
+python neurips/fig3_stablelm_routing/collect.py \
+    --model_path <ckpt_path> --label <label> \
+    --n_samples 1000 --conv_mode stablelm --gpu 6
+
+python neurips/fig3_stablelm_routing/plot.py \
+    --files neurips/fig3_stablelm_routing/data/stablelm_author.npz \
+            neurips/fig3_stablelm_routing/data/stablelm_adaptive_entropy.npz \
+    --labels "Author (random)" "Adaptive entropy"
+```
+
+**Note:** Always apply the DeepSpeed bypass patch before running any StableLM collect script. See the top of `collect.py` for the pattern.
+
+---
+
+## NeurIPS Figure 3 — Routing Entropy Over Training Steps
+
+**Folder:** `neurips/fig_entropy_trajectory/`  
+**Purpose:** Demonstrate that Fisher initialization (K-means centroids) drives routing entropy to near-zero **from step 1**, before any gradient updates. The author baseline (random init) stays near maximum entropy (ln 4 ≈ 1.386) throughout all 9240 training steps. This is the core evidence that initialization quality determines routing structure.
+
+**Metric:** Mean routing entropy H = -Σ p_j log(p_j) over all 4 experts, averaged across all 12 MoE layers and all tokens in N samples.  
+Reference lines:
+- `ln(4) ≈ 1.386` — uniform over all 4 experts (maximum entropy, router is completely undecided)
+- `ln(2) ≈ 0.693` — ideal top-2: both selected experts get exactly equal weight
+
+**Scripts:**
+- `neurips/fig_entropy_trajectory/collect.py` — discovers all `checkpoint-N` subdirs under `--model_path`, loads each, hooks `gate.wg`, computes per-layer H across N questions, saves incrementally to JSON. Frees GPU between checkpoints with `del model; torch.cuda.empty_cache()`.
+- `neurips/fig_entropy_trajectory/plot.py` — four variants: v1 (linear x), v2 (heatmap first vs last), v3 (per-layer small multiples), v4 (log x-axis — best for the 1…1000…9240 spacing)
+
+**Output JSON format:**
+```json
+{
+  "label": "qwen_author",
+  "steps": [1, 100, 200, ..., 9240],
+  "mean_H": [1.346, 1.344, ...],
+  "layer_H": { "0": [h_step1, h_step2, ...], "4": [...], ... }
+}
+```
+
+### Collected data files (`neurips/fig_entropy_trajectory/data/`)
+| File | Model | Checkpoints | N/ckpt | Key finding |
+|------|-------|------------|--------|-------------|
+| `qwen_author.json` | checkpoints_qwen_author | 12 (steps 1–9240) | 200 | H ≈ 1.34 at ALL steps — flat, never converges |
+| `qwen_student.json` | checkpoints_qwen_student | 12 (steps 1–9240) | 200 | H = 0.18 at step 1 — already 7.5× lower than author, stays flat |
+
+### Generated figures (`neurips/fig_entropy_trajectory/figures/`)
+| File | Description | Recommended for |
+|------|-------------|----------------|
+| `v1_mean_entropy.pdf/.png` | Mean H vs step, linear x-axis | Quick reference |
+| `v2_first_last_heatmap.pdf/.png` | Per-layer heatmap: step 1 vs final checkpoint | Supplementary |
+| `v3_per_layer.pdf/.png` | Small multiples: one subplot per MoE layer | Supplementary |
+| `v4_log_scale.pdf/.png` | Mean H vs step, **log x-axis** | **Paper figure** — best for irregular 1…1000…9240 spacing |
+
+### Key findings
+| Metric | Author (random init) | Student (Fisher init) |
+|--------|---------------------|----------------------|
+| H at step 1 | **1.346** (≈ max entropy ln 4) | **0.180** (7.5× lower) |
+| H at step 1000 | 1.344 (unchanged) | 0.186 (unchanged) |
+| H at step 9240 (final) | 1.344 (unchanged) | 0.188 (unchanged) |
+| Trajectory | Completely flat — training does not reduce entropy | Flat from step 1 — structure already encoded by K-means init |
+
+**Interpretation:** Routing structure is determined by initialization, not by gradient updates. Fisher/K-means centroids provide semantically meaningful router init that immediately (before training) encodes low-entropy, decisive routing. Random init never recovers.
+
+### How to run
+```bash
+# Collect entropy at each checkpoint (runs ~20 min — loads 12 checkpoints sequentially)
+python neurips/fig_entropy_trajectory/collect.py \
+    --model_path /home/prafull/scratch/hpc/checkpoints_qwen_author/llavaqwen-1.8b-finetune-moe \
+    --label qwen_author --n_samples 200 --conv_mode qwen --gpu 2
+
+python neurips/fig_entropy_trajectory/collect.py \
+    --model_path /home/prafull/scratch/hpc/checkpoints_qwen_student/llavaqwen-1.8b-finetune-moe \
+    --label qwen_student --n_samples 200 --conv_mode qwen --gpu 3
+
+# Generate all figure variants
+python neurips/fig_entropy_trajectory/plot.py \
+    --files neurips/fig_entropy_trajectory/data/qwen_author.json \
+            neurips/fig_entropy_trajectory/data/qwen_student.json \
+    --labels "Author (random init, aux loss)" "Student (Fisher init, KD)"
+```
+
+**Note:** `collect.py` includes the same DeepSpeed port-isolation fix as fig3 (`MASTER_PORT = 12400 + gpu_id`). Use different `--gpu` values when running both jobs in parallel.
+
+---
+
 ## Convergence (legacy)
 
 **Plot script:** `diagnostics/plot_convergence.py`  

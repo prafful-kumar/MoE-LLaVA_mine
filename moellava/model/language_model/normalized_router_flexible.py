@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from deepspeed.moe.sharded_moe import TopKGate
+from torch.nn.utils import parametrize as torch_parametrize
 import os
 from typing import Dict, List
 import numpy as np
@@ -417,6 +418,33 @@ class NormalizedKDTopKGate(TopKGate):
 #         aux_loss = self.aux_loss_weight * gate_output[0]
 #         return (aux_loss,) + gate_output[1:]
 
+class _ScaledL2Normalize(torch.nn.Module):
+    """Weight parametrization: wg.weight always returns L2-normalized * logit_scale in float32.
+
+    This fixes the .data-swap gradient bug: the old code temporarily replaced wg.weight.data
+    with normalized values before calling super().forward(), which broke the autograd chain
+    (the gradient w.r.t. the routing logits was NOT propagated through the normalization
+    Jacobian ∂w_normed/∂w_raw back to the stored parameters).
+
+    With register_parametrization, PyTorch autograd automatically computes the correct Jacobian
+    ∂(normalize(original)*scale)/∂original = scale*(I - n*n^T)/‖original‖ for both the
+    routing path (super().forward) and the entropy/balance loss path.
+
+    Always returns float32 so that DeepSpeed's TopKGate float-dtype check is a no-op,
+    avoiding its in-place `self.wg = self.wg.float()` replacement that could lose state.
+    """
+    def __init__(self, logit_scale: float):
+        super().__init__()
+        self.logit_scale = logit_scale
+
+    def forward(self, weight: torch.Tensor) -> torch.Tensor:
+        return F.normalize(weight.float(), p=2, dim=-1) * self.logit_scale
+
+    def right_inverse(self, value: torch.Tensor) -> torch.Tensor:
+        # Keep stored parameter in normalized-and-scaled form so re-normalizing is idempotent.
+        return F.normalize(value.float(), p=2, dim=-1) * self.logit_scale
+
+
 class SimplifiedNormalizedGate(TopKGate):
     """
     Normalized routing with Fisher initialization.
@@ -480,10 +508,15 @@ class SimplifiedNormalizedGate(TopKGate):
                     self.wg.weight.dtype
                 )
 
-    def forward(self, input, used_token=None, use_tutel=False):
-        # Preserve original dtype (critical for bf16/fp16 models like Qwen)
-        original_dtype = input.dtype
+        # Register parametrization AFTER weight init so 'original' starts with
+        # the fisher-initialized values set above.  From here on, self.wg.weight
+        # always returns normalize(original)*logit_scale in float32 with correct
+        # autograd gradient flow (no .data-swap hack needed in forward()).
+        torch_parametrize.register_parametrization(
+            self.wg, "weight", _ScaledL2Normalize(self.logit_scale)
+        )
 
+    def forward(self, input, used_token=None, use_tutel=False):
         # fp32 for numerically stable normalization
         input_fp32 = input.float()
 
@@ -492,19 +525,10 @@ class SimplifiedNormalizedGate(TopKGate):
         else:
             input_normed = input_fp32
 
-        # Normalize weights in fp32, then cast back to module's dtype
-        w_normed = F.normalize(self.wg.weight.float(), p=2, dim=-1)
-
-        original_weight_data = self.wg.weight.data
-        self.wg.weight.data = (w_normed * self.logit_scale).to(original_dtype)
-
-        try:
-            # Cast input back to original dtype before DeepSpeed/parent processes it
-            gate_output = super().forward(
-                input_normed.to(original_dtype), used_token, use_tutel
-            )
-        finally:
-            self.wg.weight.data = original_weight_data
+        # self.wg.weight is always normalize(original)*logit_scale in float32 via
+        # _ScaledL2Normalize parametrization registered in __init__.
+        # super().forward() uses it directly — correct Jacobian, no .data swap needed.
+        gate_output = super().forward(input_normed, used_token, use_tutel)
 
         raw_aux_loss = gate_output[0]
         aux_loss = self.aux_loss_weight * raw_aux_loss
@@ -512,11 +536,10 @@ class SimplifiedNormalizedGate(TopKGate):
             raw_aux_loss.item() if isinstance(raw_aux_loss, torch.Tensor) else 0.0
         )
 
-        # Compute logits once if any regularization loss needs them
+        # Logits for entropy/balance losses: wg.weight = normalize(original)*logit_scale (float32)
         need_logits = (self.entropy_loss_weight > 0.0) or (self.balance_loss_weight > 0.0)
         if need_logits:
-            w_normed_fp32 = F.normalize(self.wg.weight.float(), p=2, dim=-1)
-            logits = F.linear(input_normed, w_normed_fp32) * self.logit_scale
+            logits = F.linear(input_normed, self.wg.weight)  # float32 via parametrization
 
         # Entropy regularization
         if self.entropy_loss_weight > 0.0:
@@ -561,8 +584,17 @@ class SimplifiedNormalizedGate(TopKGate):
                 self.last_leak_loss = L_leak.item()
                 self.last_imbal_loss = 0.0
 
-                total_loss = aux_loss + self.entropy_loss_weight * (L_leak + L_adaptive)
+                # [2026-04-27] BUG FIX: L_leak must be unweighted (coefficient=1).
+                # BEFORE (wrong): w_ent scaled both L_leak and L_adaptive
+                #   total_loss = aux_loss + self.entropy_loss_weight * (L_leak + L_adaptive)
+                # AFTER  (correct): w_ent scales only L_adaptive; L_leak enters at full strength
+                #   total_loss = aux_loss + L_leak + self.entropy_loss_weight * L_adaptive
+                # This matches eq. L_router = L_leak + w_ent*(1/T Σ L_adaptive^t) + w_bal*L_var
+                total_loss = aux_loss + L_leak + self.entropy_loss_weight * L_adaptive
 
+                # [L_var toggle] To re-enable L_var: set balance_loss_weight > 0.0 in training script.
+                # [v3 experiment] L_var replaced by DeepSpeed aux loss (router_aux_loss_coef=0.1).
+                # Uncomment the block below (and remove the v3 experiment) to restore L_var behaviour.
                 if self.balance_loss_weight > 0.0:
                     L_var = variance_balance_loss(logits)
                     total_loss = total_loss + self.balance_loss_weight * L_var
@@ -593,7 +625,8 @@ class SimplifiedNormalizedGate(TopKGate):
                 self.last_alpha_mean = 1.0
                 total_loss = aux_loss + entropy_loss
 
-                # L_var: only for the non-adaptive branch
+                # [L_var toggle] To re-enable L_var: set balance_loss_weight > 0.0 in training script.
+                # [v3 experiment] L_var replaced by DeepSpeed aux loss (router_aux_loss_coef=0.1).
                 if self.balance_loss_weight > 0.0:
                     L_var = variance_balance_loss(logits)
                     total_loss = total_loss + self.balance_loss_weight * L_var

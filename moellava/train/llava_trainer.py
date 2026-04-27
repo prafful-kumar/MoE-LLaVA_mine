@@ -247,6 +247,34 @@ class LLaVATrainer(Trainer):
 
         return self.optimizer
 
+    def compute_loss(self, model, inputs, return_outputs=False):
+        outputs = model(**inputs)
+        if isinstance(outputs, dict):
+            loss = outputs["loss"]
+        elif isinstance(outputs, (tuple, list)):
+            loss = outputs[0]
+        else:
+            loss = outputs.loss
+
+        # Collect per-component losses from model attributes set during forward
+        m = model.module if hasattr(model, "module") else model
+        lm_loss = getattr(m, "_last_lm_loss", None)
+        moe_loss = getattr(m, "_last_moe_loss", None)
+        if lm_loss is not None:
+            if not hasattr(self, "_extra_log_buffer"):
+                self._extra_log_buffer = {}
+            self._extra_log_buffer["lm_loss"] = lm_loss
+            self._extra_log_buffer["moe_loss"] = moe_loss if moe_loss is not None else 0.0
+
+        return (loss, outputs) if return_outputs else loss
+
+    def log(self, logs):
+        # Flush component-loss buffer into every log call (trainer logs at logging_steps)
+        if hasattr(self, "_extra_log_buffer") and self._extra_log_buffer:
+            logs.update(self._extra_log_buffer)
+            self._extra_log_buffer = {}
+        super().log(logs)
+
     def _save_checkpoint(self, model, trial, metrics=None):
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
